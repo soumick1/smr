@@ -18,6 +18,44 @@ from smr.backbones import get_backbone                   # noqa: E402
 from smr.viz import TEAL, CORAL, savefig                 # noqa: E402
 
 
+def self_consistency(out, pairs=None, conf_mask=True):
+    """Cross-view reprojection using ONLY the backbone's own outputs:
+    unproject depth_i with pose_i, reproject into view j, compare against
+    depth_j.  Median relative error over adjacent pairs.  Distinguishes
+    'backbone failed on this input' (inconsistent) from 'adapter/GT
+    comparison is wrong' (self-consistent yet mismatching GT)."""
+    K_all = out.extras.get("intrinsics_all")
+    S = out.poses.shape[0]
+    pairs = pairs or [(i, (i + 1) % S) for i in range(S)]
+    errs = []
+    for i, j in pairs:
+        Ki = K_all[i] if K_all is not None else out.intrinsics
+        Kj = K_all[j] if K_all is not None else out.intrinsics
+        H, W = out.depth[i].shape
+        step = max(1, H // 130)
+        vs, us = np.mgrid[0:H:step, 0:W:step]
+        d = out.depth[i][::step, ::step]
+        m = d > 0
+        if conf_mask:
+            m &= out.mask[i][::step, ::step]
+        x = (us - Ki[0, 2]) / Ki[0, 0] * d
+        y = (vs - Ki[1, 2]) / Ki[1, 1] * d
+        Pc = np.stack([x[m], y[m], d[m]], -1)
+        Pw = Pc @ out.poses[i][:3, :3].T + out.poses[i][:3, 3]
+        Rj, tj = out.poses[j][:3, :3], out.poses[j][:3, 3]
+        Pj = (Pw - tj) @ Rj
+        z = Pj[:, 2]; ok = z > 1e-3
+        uj = (Kj[0, 0] * Pj[ok, 0] / z[ok] + Kj[0, 2]).round().astype(int)
+        vj = (Kj[1, 1] * Pj[ok, 1] / z[ok] + Kj[1, 2]).round().astype(int)
+        ib = (uj >= 0) & (uj < W) & (vj >= 0) & (vj < H)
+        dj = out.depth[j][vj[ib], uj[ib]]
+        good = dj > 0
+        if good.sum() < 50:
+            continue
+        errs.append(np.median(np.abs(z[ok][ib][good] - dj[good]) / dj[good]))
+    return float(np.mean(errs)) if errs else float("nan")
+
+
 def umeyama_sim3(X, Y):
     """Similarity aligning X -> Y (both (N,3)): returns s, R, t."""
     mx, my = X.mean(0), Y.mean(0)
@@ -68,9 +106,11 @@ def main():
                                   / D_gt[i][v]))
     rot_m, cen_m, dep_m = map(lambda x: float(np.mean(x)),
                               (rot_e, cen_e, dep_errs))
+    sc = self_consistency(out)
     for name, val, thr in (("rotation (deg)", rot_m, 3.0),
                            ("centre (frac scene)", cen_m, 0.03),
-                           ("depth rel medAE", dep_m, 0.05)):
+                           ("depth rel medAE", dep_m, 0.05),
+                           ("SELF-consistency", sc, 0.05)):
         print(f"  [{'PASS' if val < thr else 'WARN'}] {name:22s} "
               f"{val:.4f} (soft thr {thr})")
     fig, axs = plt.subplots(1, 3, figsize=(9.6, 3.0))

@@ -29,16 +29,23 @@ class Camera:
                          [0, 0, 1.0]])
 
 
-def build_room(seed=0, n_wall=26000, n_blobs=6, half=1.5, height=2.0):
-    """Returns (points (N,3), colors (N,3) in [0,1])."""
+def build_room(seed=0, n_wall=26000, n_blobs=6, half=1.5, height=2.0,
+               checker=6, tex_jitter=0.0):
+    """Returns (points (N,3), colors (N,3) in [0,1]).
+
+    checker: squares per wall edge; tex_jitter > 0 adds per-point
+    brightness noise -- high-frequency matchable texture for
+    correspondence-based backbones (defaults reproduce v0.1 exactly)."""
     g = rng(seed)
     pts, cols = [], []
 
     def patch(n, origin, ex, ey, base):
         uv = g.random((n, 2))
         p = origin[None] + uv[:, :1] * ex[None] + uv[:, 1:] * ey[None]
-        checker = ((np.floor(uv[:, 0] * 6) + np.floor(uv[:, 1] * 6)) % 2)
-        c = base[None] * (0.55 + 0.45 * checker[:, None])
+        chk = ((np.floor(uv[:, 0] * checker) + np.floor(uv[:, 1] * checker)) % 2)
+        c = base[None] * (0.55 + 0.45 * chk[:, None])
+        if tex_jitter > 0:
+            c = c * (1.0 + tex_jitter * (g.random((n, 1)) - 0.5))
         pts.append(p); cols.append(c)
 
     s = half
@@ -79,8 +86,9 @@ def camera_ring(n_views, radius=1.05, height=1.0, look_h=1.0, seed=0,
     return Ts
 
 
-def render(points, colors, T_wc, cam: Camera):
-    """Z-buffer point render.  Returns (rgb HxWx3, depth HxW, mask HxW)."""
+def render(points, colors, T_wc, cam: Camera, splat=2):
+    """Z-buffer point render.  Returns (rgb HxWx3, depth HxW, mask HxW).
+    splat: square splat size in pixels (2 reproduces v0.1)."""
     Rcw, tcw = T_wc[:3, :3].T, -T_wc[:3, :3].T @ T_wc[:3, 3]
     pc = points @ Rcw.T + tcw
     z = pc[:, 2]
@@ -93,8 +101,8 @@ def render(points, colors, T_wc, cam: Camera):
     order = np.argsort(-z)                       # far first, near overwrites
     ui, vi = u[order].astype(int), v[order].astype(int)
     zi, ci = z[order], cc[order]
-    for du in (0, 1):                            # 2x2 splat
-        for dv in (0, 1):
+    for du in range(splat):
+        for dv in range(splat):
             uu, vv = ui + du, vi + dv
             ok = (uu >= 0) & (uu < cam.W) & (vv >= 0) & (vv < cam.H)
             depth[vv[ok], uu[ok]] = zi[ok]
@@ -110,3 +118,17 @@ def unproject(depth, mask, cam: Camera):
     x = (us - cam.W / 2) / cam.f * depth
     y = (vs - cam.H / 2) / cam.f * depth
     return np.stack([x, y, depth], axis=-1), mask
+
+
+def fill_holes(rgb, depth, mask, max_dist=6):
+    """Nearest-neighbour hole fill (EDT) up to max_dist pixels: turns a
+    dense point splat into a photo-like frame without inventing geometry
+    beyond the local surface."""
+    from scipy import ndimage
+    d, (iy, ix) = ndimage.distance_transform_edt(~mask, return_indices=True)
+    fill = (~mask) & (d <= max_dist)
+    rgb2, dep2, m2 = rgb.copy(), depth.copy(), mask.copy()
+    rgb2[fill] = rgb[iy[fill], ix[fill]]
+    dep2[fill] = depth[iy[fill], ix[fill]]
+    m2[fill] = True
+    return rgb2, dep2, m2

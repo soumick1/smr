@@ -65,7 +65,7 @@ class VGGTBackbone(Backbone):
 
         images = load_and_preprocess_images(list(image_paths)).to(self.device)
         with torch.no_grad():
-            with torch.cuda.amp.autocast(dtype=self._dtype):
+            with torch.amp.autocast('cuda', dtype=self._dtype):
                 pred = self._model(images)             # VERIFY keys below
         # (B, S, ...) -> squeeze batch
         extri, intri = pose_encoding_to_extri_intri(
