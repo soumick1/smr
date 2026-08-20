@@ -1,0 +1,7 @@
+numpy>=1.26
+scipy>=1.11
+matplotlib>=3.8
+imageio>=2.34
+pyyaml>=6.0
+pytest>=8.0
+tqdm>=4.66

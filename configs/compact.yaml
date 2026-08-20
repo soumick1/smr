@@ -1,0 +1,9 @@
+# Local / laptop configuration: every tier runs on CPU in minutes.
+periods: [2.4, 3.2, 4.0]
+ring_N: 128
+torus_N: 32
+formation: {extent: 1.2, spacing: 0.4}
+N_h: 1024
+k: 64
+views: 8
+radius: 1.05

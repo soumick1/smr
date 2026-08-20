@@ -1,0 +1,9 @@
+# Server configuration (3x A6000 host): larger fields and scaffold.
+periods: [2.4, 3.2, 4.0, 5.6]
+ring_N: 256
+torus_N: 48
+formation: {extent: 1.6, spacing: 0.25}
+N_h: 8192
+k: 410
+views: 12
+radius: 1.05
