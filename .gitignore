@@ -4,3 +4,8 @@ __pycache__/
 third_party/
 *.egg-info/
 .pytest_cache/
+naturalistic_images/
+nerf_llff_data.zip
+nerf_llff_data/
+lab_photos/
+data/

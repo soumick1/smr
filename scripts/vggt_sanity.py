@@ -129,6 +129,10 @@ def main():
                                   / D_gt[i][v]))
     rot_m, cen_m, dep_m = map(lambda x: float(np.mean(x)),
                               (rot_e, cen_e, dep_errs))
+    worst = int(np.argmax(rot_e))
+    print(f"  medians: rot {np.median(rot_e):.2f} deg, centre "
+          f"{np.median(cen_e):.4f}; worst view = {worst} "
+          f"({rot_e[worst]:.1f} deg) -- means are outlier-sensitive")
     sc = self_consistency(out)
     for name, val, thr in (("rotation (deg)", rot_m, 3.0),
                            ("centre (frac scene)", cen_m, 0.03),

@@ -56,6 +56,24 @@ def backbone_output(name, frames_dir, device):
     return out, T_gt, D_gt
 
 
+def fit_decode_window(out, periods, frac=0.8):
+    """Guard the residue-decode envelope: camera centres must lie inside
+    +-max(period)/2 per axis or the chained decode wraps.  Well-posed
+    scenes (median depth 1, centres ~1) pass untouched; out-of-envelope
+    input (e.g. unrelated photos with degenerate scale) is Sim(3)-rescaled
+    into the window with a loud notice."""
+    window = max(periods) / 2.0
+    m = float(np.abs(out.poses[:, :3, 3]).max())
+    s2 = max(1.0, m / (frac * window))
+    if s2 > 1.0:
+        out.poses = out.poses.copy()
+        out.poses[:, :3, 3] /= s2
+        out.depth = out.depth / s2
+        print(f"  [NOTE] scene envelope: max|centre|={m:.2f} exceeds "
+              f"{frac:.1f}x decode window {window:.1f}; rescaled by 1/{s2:.2f}")
+    return out
+
+
 def subset(out, keep):
     return BackboneOutput(poses=out.poses[keep], intrinsics=out.intrinsics,
                           depth=out.depth[keep], rgb=out.rgb[keep],
@@ -73,6 +91,7 @@ def main():
     print(rep.title)
 
     out, T_gt, D_gt = backbone_output(a.backbone, a.frames, a.device)
+    out = fit_decode_window(out, periods=[2.4, 3.2, 4.0])
     K_v = out.poses.shape[0]
     H, W = out.depth.shape[1:3]
     Kmat = out.intrinsics
@@ -134,8 +153,16 @@ def main():
     rgb_s, dep_s, msk_s = splat(np.concatenate(P), np.concatenate(C), T_q, cam)
     d_bb = out.depth[a.holdout]
     both = msk_s & (d_bb > 0) & out.mask[a.holdout]
-    rel_bb = float(np.median(np.abs(dep_s[both] - d_bb[both]) / d_bb[both]))
     thr = 0.05 if a.backbone == "synthetic" else 0.12
+    if both.sum() < 200:
+        rep.check("V5 held-out depth vs backbone-self (rel med)",
+                  ("NO OVERLAP", round(float(msk_s.mean()), 3)), False,
+                  "no shared content at the held-out pose -- are these "
+                  "frames views of ONE static scene?")
+        rep.save(OUT / "reports" /
+                 f"tier3_{a.backbone}_{pathlib.Path(a.frames).name}.json")
+        sys.exit(1)
+    rel_bb = float(np.median(np.abs(dep_s[both] - d_bb[both]) / d_bb[both]))
     rep.check("V5 held-out depth vs backbone-self (rel med)",
               round(rel_bb, 4), rel_bb < thr and both.mean() > 0.10,
               f"recalled splat matches backbone frame (<{thr})")
@@ -165,8 +192,9 @@ def main():
     im = axs[2].imshow(err, cmap="magma"); axs[2].set_title(f"|dz|, med rel {rel_bb:.3f}")
     for ax in axs: ax.axis("off")
     fig.colorbar(im, ax=axs[2], fraction=0.046)
-    savefig(fig, OUT / "figures" / f"V5_{a.backbone}.png")
-    rep.save(OUT / "reports" / f"tier3_{a.backbone}.json")
+    tag = f"{a.backbone}_{pathlib.Path(a.frames).name}"
+    savefig(fig, OUT / "figures" / f"V5_{tag}.png")
+    rep.save(OUT / "reports" / f"tier3_{tag}.json")
     sys.exit(0 if rep.all_passed else 1)
 
 
