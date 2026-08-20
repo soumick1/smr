@@ -38,6 +38,15 @@ class BackboneOutput:
     extras: dict = field(default_factory=dict)
 
     def descriptor(self, i, dim=448):
+        if self.features is not None:            # adapter v2: pooled backbone
+            f = self.features[i].ravel()         # features, fixed random proj
+            g = np.random.default_rng(1234)
+            P = g.standard_normal((dim, f.size)) / np.sqrt(f.size)
+            v = P @ f
+            return v / (np.linalg.norm(v) + 1e-9)
+        return self._rgb_descriptor(i, dim)
+
+    def _rgb_descriptor(self, i, dim=448):
         """Pooled per-view descriptor, deterministic.  Placeholder for the
         plan's PCA-pooled backbone features (adapter v2); built from cues
         that survive corruption and view symmetry: block-MEAN thumbnails

@@ -74,6 +74,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--frames", default="outputs/synth_frames")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--backbone", default="vggt")
     a = ap.parse_args()
     fr = pathlib.Path(a.frames)
     if not (fr / "gt.npz").exists():
@@ -82,7 +83,7 @@ def main():
         paths = sorted(sum([[str(p) for p in fr.glob(pat)]
                             for pat in ("*.png", "*.jpg", "*.jpeg")], []))
         assert paths, f"no images found in {fr}"
-        bb = get_backbone("vggt", device=a.device)
+        bb = get_backbone(a.backbone, device=a.device)
         out = bb.infer(paths)
         sc = self_consistency(out)
         print(f"  [{'PASS' if sc < 0.05 else 'WARN'}] SELF-consistency"
@@ -95,13 +96,15 @@ def main():
         axs[2].plot(C[:, 0], C[:, 2], "o-", color=TEAL)
         axs[2].set_title("camera centres (top-down)"); axs[2].axis("equal")
         for ax in axs[:2]: ax.axis("off")
-        savefig(fig, pathlib.Path("outputs/figures/vggt_sanity_nogt.png"))
+        scene = fr.parent.name if fr.name.startswith("images") else fr.name
+        savefig(fig, pathlib.Path(
+            f"outputs/figures/sanity_{a.backbone}_{scene}.png"))
         return
     gt = np.load(fr / "gt.npz", allow_pickle=True)
     paths = [str(p) for p in gt["paths"]]
     T_gt = gt["poses"]; D_gt = gt["depth"]
 
-    bb = get_backbone("vggt", device=a.device)
+    bb = get_backbone(a.backbone, device=a.device)
     out = bb.infer(paths)
 
     C_est = out.poses[:, :3, 3]
@@ -165,7 +168,7 @@ def main():
     axs[3].set_xlabel("GT angular distance from view 0 (deg)")
     axs[3].set_title("reference-anchored drift")
     for ax in axs[:2]: ax.axis("off")
-    savefig(fig, pathlib.Path("outputs/figures/vggt_sanity.png"))
+    savefig(fig, pathlib.Path(f"outputs/figures/sanity_{a.backbone}_synth.png"))
 
 
 if __name__ == "__main__":

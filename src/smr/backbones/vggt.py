@@ -27,9 +27,10 @@ class VGGTBackbone(Backbone):
     name = "vggt"
 
     def __init__(self, device="cuda", model_id="facebook/VGGT-1B",
-                 conf_keep=0.8):
+                 conf_keep=0.8, use_features=False):
         self.device, self.model_id = device, model_id
         self.conf_keep = conf_keep          # keep this fraction by confidence
+        self.use_features = use_features    # adapter v2 (VERIFY-ON-SERVER)
         self._model = None
 
     # ------------------------------------------------------------------ load
@@ -91,8 +92,23 @@ class VGGTBackbone(Backbone):
         depth = depth / s
         poses[:, :3, 3] /= s
 
+        feats = None
+        if self.use_features:
+            # Adapter v2 descriptor source: pooled aggregator tokens.
+            # VERIFY-ON-SERVER: the README's advanced usage exposes
+            #   aggregated_tokens_list, ps_idx = model.aggregator(images)
+            # Pool the last level's patch tokens per view (mean + max).
+            try:
+                with torch.no_grad():
+                    with torch.amp.autocast('cuda', dtype=self._dtype):
+                        tok_list, _ = self._model.aggregator(images)
+                tok = tok_list[-1].squeeze(0).float().cpu().numpy()  # (S,T,C)
+                feats = np.concatenate([tok.mean(1), tok.max(1)], axis=-1)
+            except Exception as e:                       # fail LOUD, not wrong
+                print(f"  [WARN] feature extraction failed ({e}); "
+                      f"falling back to pooled-RGB descriptor")
         return BackboneOutput(poses=poses, intrinsics=intri[0],
                               depth=depth, rgb=np.clip(rgb, 0, 1),
-                              mask=mask,
+                              mask=mask, features=feats,
                               extras=dict(conf=conf, scene_scale=s,
                                           intrinsics_all=intri))

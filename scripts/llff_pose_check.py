@@ -66,6 +66,7 @@ def main():
     ap.add_argument("--scene", required=True)
     ap.add_argument("--res", default="images_8")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--backbone", default="vggt")
     a = ap.parse_args()
     T_gt, hwf, paths = load_llff(a.scene, a.res)
     name = pathlib.Path(a.scene).name
@@ -77,7 +78,7 @@ def main():
     print(f"  GT diag [{name}]: view-dir spread mean {spread.mean():.1f} deg "
           f"(forward-facing capture: expect small, ~<25)")
 
-    bb = get_backbone("vggt", device=a.device)
+    bb = get_backbone(a.backbone, device=a.device)
     out = bb.infer(paths)
 
     C_est, C_gt = out.poses[:, :3, 3], T_gt[:, :3, 3]
@@ -106,11 +107,19 @@ def main():
     axs[0].imshow(np.clip(out.rgb[0], 0, 1)); axs[0].axis("off")
     axs[0].set_title(f"{name} view 0")
     axs[1].plot(C_gt[:, 0], C_gt[:, 2], "o-", color=GRAY, label="COLMAP GT")
-    axs[1].plot(Ca[:, 0], Ca[:, 2], "x--", color=TEAL, label="VGGT aligned")
+    axs[1].plot(Ca[:, 0], Ca[:, 2], "x--", color=TEAL,
+                label=f"{a.backbone} aligned")
     axs[1].legend(); axs[1].axis("equal"); axs[1].set_title("centres (top-down)")
     axs[2].bar(range(len(cen)), cen, color=CORAL)
     axs[2].set_title("centre err / scene scale")
-    savefig(fig, pathlib.Path(f"outputs/figures/llff_{name}.png"))
+    savefig(fig, pathlib.Path(f"outputs/figures/llff_{a.backbone}_{name}.png"))
+    import json
+    pathlib.Path("outputs/reports").mkdir(parents=True, exist_ok=True)
+    pathlib.Path(f"outputs/reports/llff_{a.backbone}_{name}.json").write_text(
+        json.dumps(dict(centre_median=float(np.median(cen)),
+                        centre_mean=float(np.mean(cen)),
+                        relrot_median_deg=float(np.median(rel)),
+                        absrot_median_deg=float(np.median(rot))), indent=2))
 
 
 if __name__ == "__main__":

@@ -9,9 +9,10 @@ mkdir -p third_party && cd third_party
 # VGGT (Meta AI).  VERIFY: official repo at time of writing:
 git clone https://github.com/facebookresearch/vggt.git || true
 
-# Pi3 / pi-cubed.  VERIFY the official repo before cloning; candidate:
-#   git clone https://github.com/yyfz/Pi3.git
-echo "[Pi3] verify the official repository URL, then clone it here."
+# Pi3 / pi-cubed -- official repo VERIFIED (yyfz/Pi3):
+git clone https://github.com/yyfz/Pi3.git || true
+pip install -r Pi3/requirements.txt || true
+pip install -e Pi3 || echo "[Pi3] editable install failed; add $(pwd)/Pi3 to PYTHONPATH"
 
 # VGGT-Omega.  VERIFY: fill in the official repository when confirmed:
 echo "[VGGT-Omega] verify the official repository URL, then clone it here."
