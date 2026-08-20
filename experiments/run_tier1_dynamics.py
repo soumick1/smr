@@ -118,9 +118,23 @@ def t6_gate(rep, fast):
         T0 = make_T(np.eye(3), np.zeros(3))
         ss.place_pose(T0)
         if yaw_spin:
-            for _ in range(500 if fast else 1200):
+            # Holonomy must be measured as SPIN-ATTRIBUTABLE displacement:
+            # continuous-attractor bumps have an intrinsic drift (~1e-4
+            # units/step here) that grows with duration and is corrected by
+            # landmark re-anchoring in operation, not by the gate.  The
+            # gate's claim is only that pure rotation adds nothing on top
+            # of that baseline, so we difference against a matched idle
+            # interval of identical length (dynamics are deterministic).
+            n = 500 if fast else 1200
+            for _ in range(n):
                 ss.step_ego((0.10, 0, 0), (0, 0, 0), gate=gate)
-            return np.linalg.norm(ss.decode_position())
+            x_spin = ss.decode_position()
+            ss.place_pose(T0)
+            for _ in range(n):
+                ss.step_ego((0.0, 0.0, 0.0), (0, 0, 0), gate=gate)
+            x_idle = ss.decode_position()
+            return (np.linalg.norm(x_spin - x_idle),
+                    np.linalg.norm(x_idle), n * ss.dt)
         # path A: +x then turn 90deg then +x(ego) ; path B reversed order
         def leg_fwd():
             for _ in range(220):
@@ -136,22 +150,28 @@ def t6_gate(rep, fast):
             ss.step_ego((0, 0, 0), yawR @ np.array([0.05, 0, 0]), gate=gate)
         xb = ss.decode_position()
         return np.linalg.norm(xa - xb)
-    hol_on = run(True, yaw_spin=True)
-    hol_off = run(False, yaw_spin=True)
+    leak_on, drift_idle, T_win = run(True, yaw_spin=True)
+    leak_off, _, _ = run(False, yaw_spin=True)
     pin_on = run(True)
     pin_off = run(False)
-    rep.check("T6 holonomy drift, gated (units)", round(float(hol_on), 3),
-              hol_on < 0.08, "pure spin moves position < 0.08")
+    rep.check("T6 spin-attributable drift (leak), gated",
+              round(float(leak_on), 4), leak_on < 0.05,
+              "spin adds < 0.05 over matched idle window")
+    rep.check("T6 intrinsic drift rate (diagnostic)",
+              round(float(drift_idle / T_win), 5),
+              drift_idle / T_win < 0.004,
+              "CANN drift < 0.004 units/t (landmark-absorbed)")
     rep.check("T6 path-inv gap gated vs ungated",
               (round(float(pin_on), 3), round(float(pin_off), 3)),
               pin_on < 0.15 and pin_off > 3 * max(pin_on, 1e-3),
               "gated < 0.15 and ungated >= 3x gated")
-    fig, ax = plt.subplots(figsize=(3.6, 2.8))
-    ax.bar(["holonomy\n(gated)", "holonomy\n(ungated)", "path-inv\n(gated)",
-            "path-inv\n(ungated)"], [hol_on, hol_off, pin_on, pin_off],
-           color=[TEAL, GRAY, PURPLE, CORAL])
-    ax.set_ylabel("endpoint discrepancy")
-    ax.set_title("T6: HD gating is what buys path invariance")
+    fig, ax = plt.subplots(figsize=(4.2, 2.8))
+    ax.bar(["intrinsic\ndrift", "spin leak\n(gated)", "spin leak\n(ungated)",
+            "path-inv\n(gated)", "path-inv\n(ungated)"],
+           [drift_idle, leak_on, leak_off, pin_on, pin_off],
+           color=[GRAY, TEAL, TEAL, PURPLE, CORAL])
+    ax.set_ylabel("endpoint discrepancy (units)")
+    ax.set_title("T6: gating buys path invariance; spin adds no drift")
     savefig(fig, OUT / "figures" / "T6_gate.png")
 
 

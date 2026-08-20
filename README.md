@@ -70,6 +70,17 @@ render, live), and JSON reports with every criterion and value.
    changes (that is the portability claim, exercised here by swapping the
    synthetic backbone for a learned one).
 
+## Wiring VGGT (first learned backbone)
+1. `server/setup_backbones.sh`, then `pip install -e third_party/vggt`
+   (weights auto-download from the HF hub on first `from_pretrained`).
+2. `python scripts/export_synthetic_frames.py` renders the room to PNGs
+   plus GT poses/depth at VGGT's native 518 resolution.
+3. `python scripts/vggt_sanity.py` runs the adapter on those frames and
+   reports Sim(3)-aligned pose and depth errors vs ground truth (the
+   plan's week-3 backbone-swap check).  All repo-specific call names in
+   `src/smr/backbones/vggt.py` carry VERIFY-ON-SERVER comments -- confirm
+   them against your clone once; the adapter fails loudly otherwise.
+
 ## Stated assumptions
 1. `setup_env.sh` auto-detects CUDA; no driver version is hardcoded.
 2. Tiers 1-3 are numpy-only by design so the concept tests run anywhere;

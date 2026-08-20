@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt                     # noqa: E402
 import matplotlib.gridspec as gridspec              # noqa: E402
 from smr.backbones import get_backbone              # noqa: E402
 from smr.dynamics import ScaffoldState              # noqa: E402
-from smr.pipeline import bind, rotate               # noqa: E402
+from smr.pipeline import bind, rotate, coherent_reanchor  # noqa: E402
 from smr.scene import camera_ring, render           # noqa: E402
 from smr.utils import Report, project_root, load_config, rng  # noqa: E402
 from smr.utils.geometry import (pose_errors, make_T, euler_zyx_to_R,
@@ -88,6 +88,47 @@ def main():
     rep.check("I3 relocalisation top-1 (of {})".format(out.poses.shape[0]),
               correct, correct >= out.poses.shape[0] - 1,
               "corrupted-cue view id correct (allow 1 miss)")
+
+    # ---------------- I4: detect -> correct (incoherent), invisibility (coherent)
+    ss.place_pose(out.poses[2])
+    x_true = ss.decode_position().copy()
+    ph0 = ss.phases().copy()
+    Q = bound.block.coherent_basis()
+    g4 = rng(88)
+    z = g4.standard_normal(3 * len(periods)); z -= Q @ (Q.T @ z)
+    z *= 1.8 / np.linalg.norm(z)     # incoherent, T11-validated detectable norm
+    ph_bad = (ph0 + z.reshape(-1, 3)) % (2 * np.pi)
+    for m, mod in enumerate(ss.modules):
+        mod.torus.place((ph_bad[m, 0], ph_bad[m, 1]), steps=80)
+        mod.zring.place(ph_bad[m, 2], steps=80)
+    diag = coherent_reanchor(bound)
+    pos_err = float(np.linalg.norm(ss.decode_position() - x_true))
+    rep.check("I4 incoherent: detected & corrected",
+              (round(diag["score_before"], 3), round(diag["score_after"], 3),
+               round(pos_err, 4)),
+              diag["corrected"] and diag["score_before"] > bound.novelty_tau
+              and diag["score_after"] < bound.novelty_tau and pos_err < 0.08,
+              "novelty fires, re-anchor restores pose (<0.08)")
+    # coherent companion: a rigid shift is another valid pose -- invisible
+    d_c = np.array([0.3, 0.0, 0.0])
+    for m, mod in enumerate(ss.modules):
+        mod.place(x_true + d_c, offset=ss.offsets[m], steps=80)
+    sc_coh = bound.novelty.score(bound.block.encode_phases(ss.phases()))
+    noop = coherent_reanchor(bound)
+    rep.check("I4 coherent: below gate, correction no-op",
+              (round(float(sc_coh), 4), noop["corrected"]),
+              sc_coh < bound.novelty_tau and not noop["corrected"],
+              "valid-pose shift never triggers; only landmarks fix it")
+    fig, ax = plt.subplots(figsize=(4.2, 2.8))
+    ax.bar(["incoherent\nbefore", "incoherent\nafter fix", "coherent\nshift"],
+           [diag["score_before"], diag["score_after"], sc_coh],
+           color=[CORAL, TEAL, GRAY])
+    ax.axhline(bound.novelty_tau, color=PURPLE, ls="--", lw=1.0,
+               label="gate $\\tau$ (bind-calibrated)")
+    ax.set_ylabel("novelty (reconstruction residual)")
+    ax.set_title("I4: detect $\\to$ correct; coherent errors need landmarks")
+    ax.legend()
+    savefig(fig, OUT / "figures" / "I4_detect_correct.png")
 
     # ---------------- I5: novel-pose readout vs ground truth
     T_q = camera_ring(16, radius=cfg["radius"], seed=0)[3]   # between views 1,2
