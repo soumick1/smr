@@ -30,7 +30,8 @@ class Camera:
 
 
 def build_room(seed=0, n_wall=26000, n_blobs=6, half=1.5, height=2.0,
-               checker=6, tex_jitter=0.0):
+               checker=6, tex_jitter=0.0, closed=False, blob_n=1400,
+               distinct=False):
     """Returns (points (N,3), colors (N,3) in [0,1]).
 
     checker: squares per wall edge; tex_jitter > 0 adds per-point
@@ -39,10 +40,11 @@ def build_room(seed=0, n_wall=26000, n_blobs=6, half=1.5, height=2.0,
     g = rng(seed)
     pts, cols = [], []
 
-    def patch(n, origin, ex, ey, base):
+    def patch(n, origin, ex, ey, base, chk_n=None):
         uv = g.random((n, 2))
         p = origin[None] + uv[:, :1] * ex[None] + uv[:, 1:] * ey[None]
-        chk = ((np.floor(uv[:, 0] * checker) + np.floor(uv[:, 1] * checker)) % 2)
+        cn = chk_n if chk_n is not None else checker
+        chk = ((np.floor(uv[:, 0] * cn) + np.floor(uv[:, 1] * cn)) % 2)
         c = base[None] * (0.55 + 0.45 * chk[:, None])
         if tex_jitter > 0:
             c = c * (1.0 + tex_jitter * (g.random((n, 1)) - 0.5))
@@ -59,10 +61,27 @@ def build_room(seed=0, n_wall=26000, n_blobs=6, half=1.5, height=2.0,
           np.array([0, 0, 2 * s]), np.array([0.70, 0.45, 0.35]))       # -x wall
     patch(n_wall // 10, np.array([s, 0, -s]), np.array([0, height, 0]),
           np.array([0, 0, 2 * s]), np.array([0.45, 0.70, 0.40]))       # +x wall
+    if closed:                                                          # -z wall
+        patch(n_wall // 10, np.array([-s, 0, -s]), np.array([2 * s, 0, 0]),
+              np.array([0, height, 0]), np.array([0.62, 0.48, 0.66]),
+              chk_n=13 if distinct else None)
+    if distinct:
+        # a closed uniform checker box is near 4-fold symmetric -- pose
+        # poison for photo-trained backbones.  Break it: one large unique
+        # saturated panel per wall at a wall-specific position.
+        # offset 1 cm off the wall plane so panels occlude cleanly
+        panels = [(np.array([-s + 0.3, 0.4, s - 0.01]), np.array([1.0, 0, 0]),
+                   np.array([0, 0.9, 0]), np.array([0.95, 0.15, 0.15])),
+                  (np.array([s - 0.01, 0.9, -s + 0.4]), np.array([0, 0, 1.1]),
+                   np.array([0, 0.8, 0]), np.array([0.10, 0.20, 0.95])),
+                  (np.array([-s + 0.01, 0.2, -s + 1.6]), np.array([0, 0, 1.2]),
+                   np.array([0, 0.7, 0]), np.array([0.98, 0.85, 0.10]))]
+        for origin, ex, ey, base in panels:
+            patch(n_wall // 15, origin, ex, ey, base, chk_n=1)
     for b in range(n_blobs):
         c0 = g.uniform([-.8 * s, .2, -.8 * s], [.8 * s, .8 * height, .8 * s])
         col = g.uniform(0.25, 0.95, 3)
-        n = 1400
+        n = blob_n
         p = c0[None] + 0.12 * g.standard_normal((n, 3))
         pts.append(p); cols.append(np.tile(col, (n, 1)))
     return np.concatenate(pts), np.clip(np.concatenate(cols), 0, 1)

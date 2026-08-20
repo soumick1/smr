@@ -19,7 +19,8 @@ def main():
     cam = Camera(H=a.size, W=a.size, f=a.size * 0.833)
     # dense + finely textured: correspondence-friendly for learned backbones
     pts, cols = build_room(seed=0, n_wall=a.density, checker=10,
-                           tex_jitter=0.5)
+                           tex_jitter=0.25, closed=True, distinct=True,
+                           blob_n=max(1400, a.density // 60))
     Ts = camera_ring(a.views, radius=1.05, seed=0)
     paths, deps = [], []
     for i, T in enumerate(Ts):

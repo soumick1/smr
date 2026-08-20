@@ -53,6 +53,8 @@ def self_consistency(out, pairs=None, conf_mask=True):
         if good.sum() < 50:
             continue
         errs.append(np.median(np.abs(z[ok][ib][good] - dj[good]) / dj[good]))
+    print("  per-pair self-consistency:",
+          np.array2string(np.array(errs), precision=4))
     return float(np.mean(errs)) if errs else float("nan")
 
 
@@ -74,6 +76,27 @@ def main():
     ap.add_argument("--device", default="cuda")
     a = ap.parse_args()
     fr = pathlib.Path(a.frames)
+    if not (fr / "gt.npz").exists():
+        # GT-free mode (real photos): adapter validation via VGGT's own
+        # internal consistency + qualitative depth / top-down trajectory.
+        paths = sorted(sum([[str(p) for p in fr.glob(pat)]
+                            for pat in ("*.png", "*.jpg", "*.jpeg")], []))
+        assert paths, f"no images found in {fr}"
+        bb = get_backbone("vggt", device=a.device)
+        out = bb.infer(paths)
+        sc = self_consistency(out)
+        print(f"  [{'PASS' if sc < 0.05 else 'WARN'}] SELF-consistency"
+              f"       {sc:.4f} (soft thr 0.05, no GT)")
+        C = out.poses[:, :3, 3]
+        fig, axs = plt.subplots(1, 3, figsize=(9.6, 3.0))
+        axs[0].imshow(np.clip(out.rgb[0], 0, 1)); axs[0].set_title("view 0")
+        axs[1].imshow(out.depth[0], cmap="viridis")
+        axs[1].set_title("VGGT depth view 0")
+        axs[2].plot(C[:, 0], C[:, 2], "o-", color=TEAL)
+        axs[2].set_title("camera centres (top-down)"); axs[2].axis("equal")
+        for ax in axs[:2]: ax.axis("off")
+        savefig(fig, pathlib.Path("outputs/figures/vggt_sanity_nogt.png"))
+        return
     gt = np.load(fr / "gt.npz", allow_pickle=True)
     paths = [str(p) for p in gt["paths"]]
     T_gt = gt["poses"]; D_gt = gt["depth"]
@@ -113,12 +136,30 @@ def main():
                            ("SELF-consistency", sc, 0.05)):
         print(f"  [{'PASS' if val < thr else 'WARN'}] {name:22s} "
               f"{val:.4f} (soft thr {thr})")
-    fig, axs = plt.subplots(1, 3, figsize=(9.6, 3.0))
+    # reference-anchored drift: align frames exactly at view 0, then plot
+    # per-view rotation error against GT angular distance from view 0 --
+    # reference-anchored backbones show error growing with this distance
+    # (the inconsistency SMR's binding is designed to absorb).
+    R0a = T_gt[0, :3, :3] @ out.poses[0, :3, :3].T
+    drift, dist0 = [], []
+    for i in range(len(paths)):
+        dR = (R0a @ out.poses[i, :3, :3]).T @ T_gt[i, :3, :3]
+        drift.append(np.degrees(np.arccos(np.clip((np.trace(dR) - 1) / 2,
+                                                  -1, 1))))
+        dG = T_gt[0, :3, :3].T @ T_gt[i, :3, :3]
+        dist0.append(np.degrees(np.arccos(np.clip((np.trace(dG) - 1) / 2,
+                                                  -1, 1))))
+    fig, axs = plt.subplots(1, 4, figsize=(12.6, 3.0))
     axs[0].imshow(D_gt[0], cmap="viridis"); axs[0].set_title("GT depth v0")
     axs[1].imshow(out.depth[0], cmap="viridis"); axs[1].set_title("VGGT depth v0")
     axs[2].bar(range(len(rot_e)), rot_e, color=TEAL)
     axs[2].axhline(3.0, color=CORAL, ls="--")
     axs[2].set_title("per-view rot err (deg)")
+    order = np.argsort(dist0)
+    axs[3].plot(np.array(dist0)[order], np.array(drift)[order], "o-",
+                color=CORAL)
+    axs[3].set_xlabel("GT angular distance from view 0 (deg)")
+    axs[3].set_title("reference-anchored drift")
     for ax in axs[:2]: ax.axis("off")
     savefig(fig, pathlib.Path("outputs/figures/vggt_sanity.png"))
 
