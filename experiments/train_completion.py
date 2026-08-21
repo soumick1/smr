@@ -173,6 +173,10 @@ def main():
     ap.add_argument("--wd", type=float, default=1e-4)
     ap.add_argument("--warmup", type=int, default=500)
     ap.add_argument("--hole-weight", type=float, default=2.0)
+    ap.add_argument("--perc-weight", type=float, default=0.0,
+                    help="VGG16 perceptual loss on the composite (0=off). "
+                         "Recommended 0.05 for corpus-scale training; the "
+                         "pass-through rule focuses its gradients on holes.")
     ap.add_argument("--depth-weight", type=float, default=0.5)
     ap.add_argument("--base", type=int, default=48)
     ap.add_argument("--log-every", type=int, default=50)
@@ -224,6 +228,24 @@ def main():
             f"({torch.cuda.get_device_name(0) if dev == 'cuda' else 'cpu'})"
             f" | params {n_par/1e6:.1f}M")
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=a.wd)
+    perc = None
+    if a.perc_weight > 0:
+        try:
+            import torchvision
+            vgg = torchvision.models.vgg16(
+                weights=torchvision.models.VGG16_Weights.IMAGENET1K_V1
+            ).features[:16].to(dev).eval()
+            for p in vgg.parameters():
+                p.requires_grad_(False)
+            _m = torch.tensor([0.485, 0.456, 0.406],
+                              device=dev).view(1, 3, 1, 1)
+            _s = torch.tensor([0.229, 0.224, 0.225],
+                              device=dev).view(1, 3, 1, 1)
+            perc = lambda x: vgg((x - _m) / _s)      # noqa: E731
+            lg.info(f"perceptual loss on (VGG16 relu3_3, w={a.perc_weight})")
+        except Exception as e:
+            lg.warning(f"perceptual loss unavailable ({e}); continuing "
+                       f"with L1 only")
     scaler = torch.amp.GradScaler(enabled=(dev == "cuda"))
 
     def lr_at(s):
@@ -257,8 +279,13 @@ def main():
         vd = b["tgt_valid"]
         l_dep = ((w * vd * (dep - b["tgt_depth"]).abs()).sum()
                  / (vd.sum() + 1e-6)) * a.depth_weight
-        return l_rgb + l_dep, dict(loss_rgb=l_rgb, loss_rgb_hole=l_rgb_hole,
-                                   loss_depth=l_dep), (rgb, dep)
+        l_perc = torch.zeros((), device=l_rgb.device)
+        if perc is not None:
+            comp = b["splat_mask"] * b["splat_rgb"] + hole * rgb
+            l_perc = (perc(comp) - perc(b["tgt_rgb"])).abs().mean()                 * a.perc_weight
+        return l_rgb + l_dep + l_perc, dict(
+            loss_rgb=l_rgb, loss_rgb_hole=l_rgb_hole,
+            loss_depth=l_dep, loss_perc=l_perc), (rgb, dep)
 
     @torch.no_grad()
     def evaluate(save_step=None):
@@ -316,7 +343,7 @@ def main():
         mw = csv.writer(fm); ew = csv.writer(fe)
         if fm.tell() == 0:
             mw.writerow(["step", "lr", "loss", "loss_rgb", "loss_rgb_hole",
-                         "loss_depth", "grad_norm", "img_s"])
+                         "loss_depth", "loss_perc", "grad_norm", "img_s"])
         if fe.tell() == 0:
             ew.writerow(["step", "psnr_all", "psnr_hole", "l1_hole",
                          "absrel_hole", "absrel_known", "is_best"])
@@ -355,13 +382,15 @@ def main():
                         f"lr {lr_at(step):.2e} loss {loss.item():.4f} "
                         f"(rgb {parts['loss_rgb'].item():.4f} "
                         f"hole {parts['loss_rgb_hole'].item():.4f} "
-                        f"dep {parts['loss_depth'].item():.4f}) "
+                        f"dep {parts['loss_depth'].item():.4f} "
+                        f"perc {parts['loss_perc'].item():.4f}) "
                         f"gn {float(gn):.2f} | {ips:.1f} img/s eta {eta:.0f}m")
                     mw.writerow([step, f"{lr_at(step):.3e}",
                                  f"{loss.item():.5f}",
                                  f"{parts['loss_rgb'].item():.5f}",
                                  f"{parts['loss_rgb_hole'].item():.5f}",
                                  f"{parts['loss_depth'].item():.5f}",
+                                 f"{parts['loss_perc'].item():.5f}",
                                  f"{float(gn):.3f}", f"{ips:.2f}"])
                     fm.flush()
                 if step % a.eval_every == 0 or step == a.steps:
