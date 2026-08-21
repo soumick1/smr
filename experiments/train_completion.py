@@ -186,6 +186,10 @@ def main():
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--eval-only", default="")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--all-val", action="store_true",
+                    help="treat every pair as validation (no training "
+                         "split); for zero-shot --eval-only on a corpus "
+                         "the checkpoint never trained on")
     a = ap.parse_args()
 
     run = ROOT / a.out_root / a.name
@@ -197,8 +201,11 @@ def main():
     assert files, f"no npz pairs under {a.data}"
     tr_f, va_f, val_scenes, scenes = split_scenes(files, a.val_scenes,
                                                   a.val_frac)
-    assert tr_f and va_f, "empty split -- adjust --val-scenes/--val-frac"
-    st_tr, st_va = dataset_stats(tr_f), dataset_stats(va_f)
+    if a.all_val:
+        tr_f, va_f, val_scenes = [], list(files), scenes
+    assert va_f and (tr_f or a.eval_only or a.dry_run),         "empty split -- adjust --val-scenes/--val-frac (--all-val needs "         "--eval-only or --dry-run)"
+    st_tr = dataset_stats(tr_f) if tr_f else {"n": 0}
+    st_va = dataset_stats(va_f)
     cfg = dict(args=vars(a), git=git_commit(),
                scenes=scenes, val_scenes=val_scenes,
                train_stats=st_tr, val_stats=st_va)
@@ -206,13 +213,18 @@ def main():
     lg.info(f"run dir: {run}")
     lg.info(f"pairs: {len(files)} | train {len(tr_f)} / val {len(va_f)} | "
             f"scenes {len(scenes)} (val: {','.join(val_scenes)})")
-    lg.info(f"train coverage {st_tr['coverage_mean']} "
-            f"[{st_tr['coverage_min']}, {st_tr['coverage_max']}] | "
-            f"context hist {st_tr['context_hist']}")
+    if tr_f:
+        lg.info(f"train coverage {st_tr['coverage_mean']} "
+                f"[{st_tr['coverage_min']}, {st_tr['coverage_max']}] | "
+                f"context hist {st_tr['context_hist']}")
+    else:
+        lg.info(f"all-val mode: {len(va_f)} evaluation pairs, "
+                f"coverage {st_va['coverage_mean']}")
 
     if a.dry_run:
-        ds = PairDataset(tr_f, crop=a.crop, seed=a.seed)
-        b = next(ds.batches(min(a.batch, len(tr_f))))
+        pool = tr_f or va_f
+        ds = PairDataset(pool, crop=a.crop, seed=a.seed)
+        b = next(ds.batches(min(a.batch, len(pool))))
         lg.info("DRY RUN: sample batch " +
                 ", ".join(f"{k}{tuple(v.shape)}" for k, v in b.items()))
         lg.info("DRY RUN OK -- data, split, logging verified"); return
