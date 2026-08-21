@@ -53,6 +53,9 @@ def main():
 
     n = 0
     for h in hold:
+        if (dst / f"{scene}_{a.backbone}_h{h:03d}.npz").exists():
+            print(f"  h{h:03d}: exists, skipping")
+            continue
         keep = [i for i in range(K_v) if i != h]
         ss = ScaffoldState(periods=[2.4, 3.2, 4.0], ring_N=128, torus_N=32,
                            seed=0, omega_max=0.16)
