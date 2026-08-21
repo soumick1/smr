@@ -244,9 +244,12 @@ def main():
     if a.perc_weight > 0:
         try:
             import torchvision
-            vgg = torchvision.models.vgg16(
-                weights=torchvision.models.VGG16_Weights.IMAGENET1K_V1
-            ).features[:16].to(dev).eval()
+            try:        # torchvision >= 0.13
+                _w = torchvision.models.VGG16_Weights.IMAGENET1K_V1
+                _vgg_full = torchvision.models.vgg16(weights=_w)
+            except AttributeError:   # older torchvision API
+                _vgg_full = torchvision.models.vgg16(pretrained=True)
+            vgg = _vgg_full.features[:16].to(dev).eval()
             for p in vgg.parameters():
                 p.requires_grad_(False)
             _m = torch.tensor([0.485, 0.456, 0.406],
