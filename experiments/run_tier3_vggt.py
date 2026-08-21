@@ -87,6 +87,10 @@ def main():
     ap.add_argument("--frames", default="outputs/synth_frames")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--holdout", type=int, default=2)
+    ap.add_argument("--scale", choices=["compact", "full"],
+                    default="compact",
+                    help="full: ring 256, torus 64, N_h 8192 -- halves the "
+                         "residue-decode floor")
     ap.add_argument("--features", action="store_true",
                     help="adapter v2: pooled VGGT aggregator tokens as "
                          "descriptors (VERIFY-ON-SERVER)")
@@ -103,7 +107,9 @@ def main():
     Kmat = out.intrinsics
     cam = Camera(H=H, W=W, f=float(Kmat[0, 0]))   # cx,cy ~ centre (checked ok)
 
-    ss = ScaffoldState(periods=[2.4, 3.2, 4.0], ring_N=128, torus_N=32,
+    ring_N, torus_N_, N_h_, k_ = ((256, 64, 8192, 410)
+                                  if a.scale == "full" else (128, 32, 1024, 64))
+    ss = ScaffoldState(periods=[2.4, 3.2, 4.0], ring_N=ring_N, torus_N=torus_N_,
                        seed=0, omega_max=0.16)
     ss.calibrate()
 
@@ -121,7 +127,8 @@ def main():
 
     keep = [i for i in range(K_v) if i != a.holdout]
     bound = bind(subset(out, keep), ss, cam, formation_extent=1.2,
-                 formation_spacing=0.4, torus_N=32, N_h=1024, k=64, seed=0)
+                 formation_spacing=0.3 if a.scale == "full" else 0.4,
+                 torus_N=torus_N_, N_h=N_h_, k=k_, seed=0)
 
     # V3: relocalisation quality in POSE space, thresholded by the
     # capture's own view spacing.  On dense captures (LLFF: dozens of
