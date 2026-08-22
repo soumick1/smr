@@ -95,8 +95,12 @@ def main():
                 C.append(pay["cols"])
             rgb_s, dep_s, msk_s = splat(np.concatenate(P), np.concatenate(C),
                                         T_q, cam)
+            gaps = [_pe(out.poses[i], T_q) for i in keep]
+            nov_rot, nov_pos = min(g[0] for g in gaps), min(g[1] for g in gaps)
             np.savez_compressed(
                 fn,
+                novelty_rot=nov_rot, novelty_pos=nov_pos,
+                context_ids=np.array(keep, dtype=np.int32),
                 splat_rgb=rgb_s.astype(np.float16),
                 splat_depth=dep_s.astype(np.float16),
                 splat_mask=msk_s,
@@ -105,7 +109,8 @@ def main():
                 tgt_mask=out.mask[h],
                 pose=T_q, K=out.intrinsics, context=len(keep))
             n += 1
-            print(f"  h{h:03d} c{tagc}: coverage {msk_s.mean():.2f} -> "
+            print(f"  h{h:03d} c{tagc}: coverage {msk_s.mean():.2f} "
+                  f"novelty {np.degrees(nov_rot):.1f}deg/{nov_pos:.3f} -> "
                   f"{fn.name}")
     print(f"harvested {n} pairs -> {dst}")
 

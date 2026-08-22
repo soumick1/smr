@@ -9,9 +9,10 @@
 #                OUT (data/completion_co3d), LIMIT (80 scenes/category)
 set -e
 CO3D_REPO=${CO3D_REPO:-co3d}
-DATA=${DATA:-$HOME/co3d_data}
+DATA=${DATA:-$HOME/co3d_full}
 OUT=${OUT:-data/completion_co3d}
 LIMIT=${LIMIT:-80}
+BACKBONES=${BACKBONES:-vggt}
 mkdir -p "$DATA"
 for cat in "$@"; do
   echo "================ $cat : download ================"
@@ -26,10 +27,12 @@ for cat in "$@"; do
   find "$DATA/$cat" -type f \( -name "pointcloud.ply" -o -name "*.jgz" \) \
        -delete 2>/dev/null || true
   df -h "$DATA" | tail -1
-  echo "================ $cat : harvest ================"
-  python scripts/harvest_root.py --root "$DATA/$cat" --images-sub images \
-     --backbone vggt --out "$OUT" --holdouts every:5 --context 1,4,all \
-     --max-views 32 --limit-scenes "$LIMIT"
+  for bb in $BACKBONES; do
+    echo "================ $cat : harvest [$bb] ================"
+    python scripts/harvest_root.py --root "$DATA/$cat" --images-sub images \
+       --backbone "$bb" --out "$OUT" --holdouts every:5 --context 1,4,all \
+       --max-views 32 --limit-scenes "$LIMIT"
+  done
   echo "================ $cat : delete raw ================"
   rm -rf "${DATA:?}/$cat"
   echo "$cat done; pairs so far: $(ls "$OUT" | wc -l)"

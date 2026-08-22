@@ -149,6 +149,8 @@ def save_samples(run, step, rows, tag=""):
         panels = [("splat", r["splat"]), ("prediction", r["pred"]),
                   ("composite", r["comp"]), ("target", r["tgt"]),
                   ("|err| composite", r["err"]), ("depth comp.", r["dcomp"])]
+        if "name" in r:
+            fig.suptitle(r["name"], fontsize=8, y=1.02)
         for ax, (t, im) in zip(axs, panels):
             ax.imshow(im if im.ndim == 3 else im, cmap=None if im.ndim == 3
                       else ("magma" if "err" in t else "viridis"))
@@ -341,6 +343,7 @@ def main():
             if save_step is not None and len(rows) < 4 and hole.mean() > .05:
                 err = np.abs(comp - it["tgt_rgb"]).mean(0)
                 rows.append(dict(
+                    name=pathlib.Path(ds.files[i]).name,
                     splat=it["splat_rgb"].transpose(1, 2, 0),
                     pred=rgb.transpose(1, 2, 0),
                     comp=comp.transpose(1, 2, 0),
