@@ -220,3 +220,170 @@ def summarise(est, gt, delta=1):
                 rra_median_deg=float(np.median(rra)) if len(rra) else float("nan"),
                 rta_median_deg=float(np.median(rta)) if len(rta) else float("nan"),
                 n_frames=int(len(gt)))
+
+
+# ------------------------------------------------- v65: long-horizon set --
+def find_revisit_pairs(gt, min_gap=20, max_dist=None, max_angle_deg=45.0,
+                       one_per_frame=True):
+    """Ground-truth revisit pairs (i, j): the camera returns close to an
+    earlier viewpoint.
+
+    A pair qualifies when j - i >= min_gap frames, the GT centres are within
+    max_dist (default 10% of the trajectory's bounding-box diagonal) and the
+    GT orientations differ by less than max_angle_deg.  With one_per_frame,
+    each i keeps only the j with the LARGEST gap, so the count is at most N
+    and long loops are not swamped by the many near-duplicate pairs a
+    lingering camera produces.
+    """
+    gt = np.asarray(gt, float)
+    n = len(gt)
+    c = gt[:, :3, 3]
+    if max_dist is None:
+        max_dist = 0.10 * float(np.linalg.norm(np.ptp(c, axis=0))) + 1e-12
+    pairs = []
+    for i in range(n):
+        best = None
+        for j in range(n - 1, i + min_gap - 1, -1):     # largest gap first
+            if np.linalg.norm(c[i] - c[j]) >= max_dist:
+                continue
+            if rotation_angle_deg(gt[i, :3, :3].T @ gt[j, :3, :3]) >= max_angle_deg:
+                continue
+            best = (i, j)
+            if one_per_frame:
+                break
+            pairs.append(best)
+        if one_per_frame and best is not None:
+            pairs.append(best)
+    return pairs
+
+
+def loop_closure_error(est, gt, pairs, scale=None):
+    """Error of the ESTIMATED RELATIVE POSE across each revisit pair.
+
+    For (i, j): rel = inv(T_i) @ T_j, expressed in camera i's own frame, for
+    both estimate and truth.  The rotation error is alignment-free.  The
+    translation error needs only the trajectory's single global scale
+    (from the Sim(3) alignment to GT unless `scale` is given) -- no world
+    rotation or translation is applied, so the error at the loop is not
+    smeared over the trajectory the way a globally aligned centre error is.
+    This is the quantity drift accumulates into and loop closure removes.
+    """
+    est = np.asarray(est, float)
+    gt = np.asarray(gt, float)
+    if not pairs:
+        return dict(rot_deg_mean=float("nan"), rot_deg_med=float("nan"),
+                    trans_mean=float("nan"), trans_med=float("nan"), n=0)
+    if scale is None:
+        _, (scale, _, _) = align_to_gt(est, gt)
+    rot, tr = [], []
+    for i, j in pairs:
+        rg = np.linalg.inv(gt[i]) @ gt[j]
+        re = np.linalg.inv(est[i]) @ est[j]
+        rot.append(rotation_angle_deg(re[:3, :3].T @ rg[:3, :3]))
+        tr.append(float(np.linalg.norm(scale * re[:3, 3] - rg[:3, 3])))
+    rot, tr = np.array(rot), np.array(tr)
+    return dict(rot_deg_mean=float(rot.mean()), rot_deg_med=float(np.median(rot)),
+                trans_mean=float(tr.mean()), trans_med=float(np.median(tr)),
+                n=len(pairs))
+
+
+def auc_split(est, gt, groups, max_threshold=30):
+    """AUC@30 over pairs that shared a backbone pass ('within') and pairs
+    that never did ('cross'), plus the pooled value.
+
+    `groups` are the frame-index lists of the passes.  Within-pass pairs
+    are decided by the backbone alone and must be identical across
+    stitching methods that share passes (the pass-through invariant, made
+    visible); cross-pass pairs are decided by the stitcher and are where
+    any long-horizon gain has to appear.
+    """
+    est = np.asarray(est, float)
+    gt = np.asarray(gt, float)
+    n = len(gt)
+    same = np.zeros((n, n), bool)
+    for g in groups:
+        g = list(g)
+        for a in g:
+            same[a, g] = True
+    rra, rta = pairwise_pose_errors(est, gt)
+    iu = np.triu_indices(n, 1)
+    within = same[iu]
+    out = dict(auc_all=auc_at(rra, rta, max_threshold),
+               auc_within=auc_at(rra[within], rta[within], max_threshold),
+               auc_cross=auc_at(rra[~within], rta[~within], max_threshold),
+               n_within=int(within.sum()), n_cross=int((~within).sum()))
+    return out
+
+
+def scale_drift(est, gt, window=16):
+    """How much the local scale wanders along the trajectory.
+
+    Every backbone pass carries its own scale gauge, and chaining
+    multiplies gauge errors.  Each window of `window` frames is aligned to
+    GT on its own; its Umeyama scale is compared to the whole-trajectory
+    scale.  Returns the max and std of |log(s_window / s_global)|.
+    """
+    est = np.asarray(est, float)
+    gt = np.asarray(gt, float)
+    n = len(gt)
+    _, (s_glob, _, _) = align_to_gt(est, gt)
+    logs = []
+    for a in range(0, max(1, n - window + 1), max(1, window // 2)):
+        idx = list(range(a, min(n, a + window)))
+        if len(idx) < 3:
+            continue
+        s, _, _ = umeyama_sim3(est[idx, :3, 3], gt[idx, :3, 3])
+        logs.append(np.log(max(s, 1e-12) / max(s_glob, 1e-12)))
+    logs = np.array(logs) if logs else np.zeros(1)
+    return dict(max_abs_log=float(np.abs(logs).max()),
+                std_log=float(logs.std()), n_windows=int(len(logs)))
+
+
+def rpe_at_distance(est, gt, dist, with_scale=True):
+    """RPE over pairs (i, j) where j is the first frame whose GT path length
+    from i reaches `dist` (in GT units -- metres for 7-Scenes / TUM).
+
+    A frame-gap RPE mixes fast and slow camera motion; a metric-distance
+    RPE is the drift rate per metre travelled, which is what a long-horizon
+    claim is about.  Returns (trans_rmse, rot_rmse_deg, n_pairs).
+    """
+    aligned, _ = align_to_gt(est, gt, with_scale=with_scale)
+    gt = np.asarray(gt, float)
+    c = gt[:, :3, 3]
+    seg = np.linalg.norm(np.diff(c, axis=0), axis=1)
+    cum = np.concatenate([[0.0], np.cumsum(seg)])
+    tr, ro = [], []
+    for i in range(len(gt)):
+        js = np.nonzero(cum - cum[i] >= dist)[0]
+        js = js[js > i]
+        if len(js) == 0:
+            break
+        j = int(js[0])
+        d_gt = np.linalg.inv(gt[i]) @ gt[j]
+        d_es = np.linalg.inv(aligned[i]) @ aligned[j]
+        E = np.linalg.inv(d_gt) @ d_es
+        tr.append(float(np.linalg.norm(E[:3, 3])))
+        ro.append(rotation_angle_deg(E[:3, :3]))
+    if not tr:
+        return float("nan"), float("nan"), 0
+    return (float(np.sqrt(np.mean(np.square(tr)))),
+            float(np.sqrt(np.mean(np.square(ro)))), len(tr))
+
+
+def summarise_long(est, gt, groups, revisit_pairs, chunk_len=16,
+                   rpe_dist=None):
+    """Every long-horizon column for one trajectory, in one call."""
+    cols = summarise(est, gt, delta=1)
+    rpe_ct, rpe_cr = rpe(est, gt, delta=max(1, chunk_len))
+    cols.update(rpe_trans_chunk=rpe_ct, rpe_rot_chunk_deg=rpe_cr)
+    if rpe_dist is not None:
+        t, r, n = rpe_at_distance(est, gt, rpe_dist)
+        cols.update(rpe_trans_dist=t, rpe_rot_dist_deg=r, n_dist_pairs=n)
+    cols.update(auc_split(est, gt, groups))
+    lc = loop_closure_error(est, gt, revisit_pairs)
+    cols.update(loop_rot_deg=lc["rot_deg_mean"], loop_rot_med_deg=lc["rot_deg_med"],
+                loop_trans=lc["trans_mean"], loop_trans_med=lc["trans_med"],
+                n_revisit_pairs=lc["n"])
+    sd = scale_drift(est, gt, window=chunk_len)
+    cols.update(scale_drift_max=sd["max_abs_log"], scale_drift_std=sd["std_log"])
+    return cols

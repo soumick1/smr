@@ -166,20 +166,10 @@ def test_summarise_returns_every_pilot_a_column():
 
 
 # ------------------------------------------------- Pilot A harness --------
-def _pilot():
-    import importlib.util, pathlib, sys
-    spec = importlib.util.spec_from_file_location(
-        "pa", pathlib.Path(__file__).resolve().parents[1] /
-        "experiments" / "pilot_a.py")
-    pa = importlib.util.module_from_spec(spec)
-    argv = sys.argv; sys.argv = ["pa"]; spec.loader.exec_module(pa)
-    sys.argv = argv
-    return pa
-
-
+# (v65: the harness moved from experiments/pilot_a.py into src/smr/stitch)
 def test_chunks_cover_every_frame_with_the_requested_overlap():
-    pa = _pilot()
-    ch = pa.make_chunks(40, 12, 4)
+    from smr.stitch import make_chunks
+    ch = make_chunks(40, 12, 4)
     assert set().union(*ch) == set(range(40))
     for a, b in zip(ch, ch[1:]):
         assert len(set(a) & set(b)) >= 3, "Sim(3) needs 3 shared frames"
@@ -189,33 +179,37 @@ def test_regauge_puts_a_chunk_in_its_own_frame_and_scale():
     """Every backbone reports relative to its first view and normalises
     scale per call; a simulated chunk must do the same or the experiment
     measures nothing."""
-    pa = _pilot()
+    from smr.stitch import regauge
     T = traj(8)
-    g = pa.regauge(T)
+    g = regauge(T)
     assert np.allclose(g[0], np.eye(4), atol=1e-9)
     assert abs(np.median(np.linalg.norm(g[1:, :3, 3], axis=1)) - 1.0) < 1e-9
 
 
 def test_stitching_is_exact_when_chunks_are_error_free():
-    """Both stitchers must reconstruct the trajectory up to a similarity
-    when each chunk is a perfect regauged view of the truth -- otherwise a
-    difference between them later cannot be attributed to the mechanism."""
-    pa = _pilot()
+    """The stitchers must reconstruct the trajectory up to a similarity
+    when each pass is a perfect regauged view of the truth -- otherwise a
+    difference between rows later cannot be attributed to the mechanism."""
+    from smr.stitch import (AnchoredStitcher, DescriptorIndex, PassCache,
+                            SimulatedRunner, make_chunks, stitch_chained)
     gt = traj(30)
-    chunks = pa.make_chunks(30, 12, 4)
-    outs = [pa.regauge(gt[idx]) for idx in chunks]
-    est = pa.stitch_baseline(outs, chunks)
+    chunks = make_chunks(30, 12, 4)
+    cache = PassCache()
+    runner = SimulatedRunner(gt, noise=0.0, distortion=0.0)
+    est = stitch_chained(chunks, cache, runner)
     assert ate_rmse(est, gt) < 1e-9
+    r = AnchoredStitcher(DescriptorIndex(), n_sites=0).run(chunks, cache, runner)
+    assert ate_rmse(r["est"], gt) < 1e-9
 
 
 def test_continuity_decode_beats_single_window_decode_over_a_long_path():
     """A grid module reports position only modulo its period, so a decode
     confined to one window aliases once the path exceeds it.  Unwrapping
     against the previous decode is what makes long trajectories readable."""
-    pa = _pilot()
     from smr.dynamics import ScaffoldState
+    from smr.stitch import PERIODS, scaffold_decode
     from smr.utils.geometry import euler_zyx_to_R, make_T
-    ss = ScaffoldState(periods=pa.PERIODS, ring_N=128, torus_N=32, seed=0,
+    ss = ScaffoldState(periods=list(PERIODS), ring_N=128, torus_N=32, seed=0,
                        omega_max=0.16)
     ss.calibrate()
     xs = np.stack([np.array([0.4 * i, 0.0, 0.0]) for i in range(12)])
@@ -223,8 +217,8 @@ def test_continuity_decode_beats_single_window_decode_over_a_long_path():
     for x in xs:
         T = make_T(euler_zyx_to_R(0.0, 0.0, 0.0), x)
         ss.place_pose(T)
-        abs_err.append(np.linalg.norm(pa.scaffold_decode(ss)[:3, 3] - x))
-        d = pa.scaffold_decode(ss, near=near)
+        abs_err.append(np.linalg.norm(scaffold_decode(ss)[:3, 3] - x))
+        d = scaffold_decode(ss, near=near)
         cont_err.append(np.linalg.norm(d[:3, 3] - x))
         near = d[:3, 3]
     assert max(cont_err) < 0.05, f"continuity decode drifted: {cont_err}"
@@ -275,9 +269,21 @@ def test_pose_alignment_recovers_a_known_similarity_exactly():
     assert np.allclose(R, R_t, atol=1e-9) and np.allclose(t, t_t, atol=1e-9)
 
 
-def test_stitchers_use_orientation_aware_alignment():
-    pa = _pilot()
-    import inspect
-    for fn in (pa.stitch_baseline, pa.stitch_smr):
-        src = inspect.getsource(fn)
-        assert "sim3_from_poses" in src, f"{fn.__name__} still points-only"
+def test_stitchers_survive_collinear_overlaps():
+    """Behavioural form of the check above: passes whose overlaps are
+    nearly collinear (a smooth forward walk) must still chain exactly when
+    the passes are error-free, which points-only alignment cannot do."""
+    from smr.stitch import PassCache, SimulatedRunner, make_chunks, stitch_chained
+
+    def rot_y(a):
+        return np.array([[np.cos(a), 0, np.sin(a)], [0, 1, 0],
+                         [-np.sin(a), 0, np.cos(a)]])
+    n = 24
+    gt = np.tile(np.eye(4), (n, 1, 1))
+    for i in range(n):
+        a = 0.02 * i
+        gt[i, :3, :3] = rot_y(a)
+        gt[i, :3, 3] = [np.sin(a), 0, np.cos(a)]
+    chunks = make_chunks(n, 8, 4)
+    est = stitch_chained(chunks, PassCache(), SimulatedRunner(gt, 0.0, 0.0))
+    assert ate_rmse(est, gt) < 1e-8

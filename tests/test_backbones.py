@@ -357,7 +357,12 @@ def test_local_checkpoint_wins_over_hub(tmp_path, monkeypatch):
 
 
 def test_hub_id_used_when_no_local_file(tmp_path, monkeypatch):
-    monkeypatch.setenv("SMR_CKPT_DIR", str(tmp_path))
+    """SMR_CKPT_DIR is only the FIRST directory searched; the real
+    third_party/checkpoints/ is always a fallback, so on a server that has
+    the weights this test must point the whole search at the empty tmp dir
+    (v65 fix: it used to fail wherever DUSt3R weights were installed)."""
+    from smr.backbones import pointmap
+    monkeypatch.setattr(pointmap, "checkpoint_dirs", lambda: [tmp_path])
     cls = _REGISTRY["dust3r"]
     assert cls.resolve_weights() == cls.weights_hub
 

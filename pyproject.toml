@@ -12,3 +12,7 @@ dependencies = ["numpy>=1.26", "scipy>=1.11", "matplotlib>=3.8",
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["third_party", "co3d", ".venv", "outputs", "data", "build", "dist"]
