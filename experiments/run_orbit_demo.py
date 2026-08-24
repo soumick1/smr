@@ -60,6 +60,10 @@ def main():
                          "capture poses -- the model mentally walks the "
                          "orbit, object held in view.")
     ap.add_argument("--scale", choices=["compact", "full"], default="compact")
+    ap.add_argument("--complete", default="",
+                    help="path to a completion ckpt (ckpt_best.pt); fills "
+                         "the disocclusions in the arrival render and adds "
+                         "the completed panel + metrics")
     a = ap.parse_args()
 
     out, T_gt, D_gt = t3.backbone_output(a.backbone, a.frames, a.device)
@@ -140,14 +144,55 @@ def main():
     print(f"  arrival splat vs backbone held-out: rel med {rel:.4f} "
           f"(coverage {both.mean():.2f})")
 
+    comp_rgb = comp_dep = None
+    rel_c = psnr_hole_c = float("nan")
+    if a.complete:
+        import torch
+        from smr.completion import CompletionUNet
+        dev_t = "cuda" if torch.cuda.is_available() else "cpu"
+        ck = torch.load(a.complete, map_location=dev_t,
+                        weights_only=False)
+        net = CompletionUNet(base=ck.get("args", {}).get("base", 48))
+        net.load_state_dict(ck["model"]); net.to(dev_t).eval()
+        x = np.concatenate([rgb_s, np.clip(dep_s, 0, 8)[..., None] / 4.0,
+                            msk_s[..., None]],
+                           -1).astype(np.float32).transpose(2, 0, 1)[None]
+        xt = torch.from_numpy(x).to(dev_t)
+        Hh, Ww = xt.shape[-2:]
+        ph, pw = (-Hh) % 16, (-Ww) % 16
+        xt = torch.nn.functional.pad(xt, (0, pw, 0, ph), mode="reflect")
+        with torch.no_grad():
+            p_rgb, p_dep = net(xt)
+        p_rgb = p_rgb[..., :Hh, :Ww].cpu().numpy()[0].transpose(1, 2, 0)
+        p_dep = p_dep[..., :Hh, :Ww].cpu().numpy()[0, 0]
+        comp_rgb = np.where(msk_s[..., None], rgb_s, p_rgb)
+        comp_dep = np.where(msk_s, dep_s, p_dep)
+        vb = (d_bb > 0) & out.mask[tgt]
+        rel_c = float(np.median(np.abs(comp_dep[vb] - d_bb[vb]) / d_bb[vb]))
+        hole = (~msk_s) & out.mask[tgt]
+        if hole.sum() >= 200:
+            e2 = ((comp_rgb - out.rgb[tgt]) ** 2)[hole]
+            psnr_hole_c = float(-10 * np.log10(e2.mean() + 1e-9))
+        print(f"  completed [ckpt step {ck.get('step', '?')}]: rel med "
+              f"{rel_c:.4f} at coverage {vb.mean():.2f} "
+              f"(was {rel:.4f} @ {both.mean():.2f}) | hole PSNR "
+              f"{psnr_hole_c:.2f} dB")
+
     scene = pathlib.Path(a.frames).name
     scene = pathlib.Path(a.frames).parent.name if scene.startswith("images") \
         else scene
     tag = f"{a.backbone}_{scene}" + ("_orbitpath" if a.path == "orbit"
                                        else "") +         ("_full" if a.scale == "full" else "")
 
-    fig, axs = plt.subplots(1, 4, figsize=(14.6, 3.1),
+    ncol = 5 if comp_rgb is not None else 4
+    fig, axs = plt.subplots(1, ncol, figsize=(3.65 * ncol, 3.1),
                             gridspec_kw=dict(wspace=0.32))
+    if comp_rgb is not None:
+        axs[1].imshow(np.clip(comp_rgb, 0, 1))
+        axs[1].set_title(f"completed (hole PSNR {psnr_hole_c:.1f} dB)",
+                         fontsize=10)
+        axs[1].axis("off")
+        axs = np.concatenate([axs[:1], axs[2:]])
     axs[0].imshow(np.clip(rgb_s, 0, 1))
     axs[0].set_title("recalled render @ decoded arrival")
     axs[1].imshow(np.clip(out.rgb[tgt], 0, 1))
@@ -203,6 +248,8 @@ def main():
         backbone=a.backbone, scene=scene, K=K, start=a.start, target=tgt,
         n_steps=int(n_steps), arrival_rot=float(re_), arrival_pos=float(pe_),
         splat_rel_med=rel, coverage=float(both.mean()),
+        completed_rel_med=rel_c, completed_hole_psnr=psnr_hole_c,
+        complete_ckpt=a.complete or None,
         reanchor=diag), indent=2))
     print(f"  figure -> outputs/figures/orbit_{tag}.png")
     print(f"  report -> outputs/reports/orbit_{tag}.json")

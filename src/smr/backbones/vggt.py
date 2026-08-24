@@ -75,7 +75,9 @@ class VGGTBackbone(Backbone):
         intri = intri.squeeze(0).float().cpu().numpy()     # (S, 3, 3)
         depth = pred["depth"].squeeze(0).squeeze(-1).float().cpu().numpy()
         conf = pred["depth_conf"].squeeze(0).float().cpu().numpy()
-        rgb = images.squeeze(0).permute(0, 2, 3, 1).float().cpu().numpy()
+        if images.dim() == 3:                      # single view, no K dim
+            images = images.unsqueeze(0)
+        rgb = images.permute(0, 2, 3, 1).float().cpu().numpy()
 
         # camera-from-world -> world-from-camera
         K_views = extri.shape[0]

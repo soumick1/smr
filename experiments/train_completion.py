@@ -311,6 +311,7 @@ def main():
         agg = dict(psnr_all=[], psnr_hole=[], l1_hole=[],
                    absrel_hole=[], absrel_known=[])
         rows = []
+        stride = max(1, len(ds) // 4)   # spread samples across the val set
         for i in range(len(ds)):
             it = ds.get(i)
             x = torch.from_numpy(it["x"][None]).to(dev)
@@ -340,7 +341,8 @@ def main():
             if kv.any():
                 agg["absrel_known"].append(
                     (np.abs(dcomp - td)[kv] / td[kv]).mean())
-            if save_step is not None and len(rows) < 4 and hole.mean() > .05:
+            if save_step is not None and len(rows) < 4 \
+                    and hole.mean() > .05 and i >= len(rows) * stride:
                 err = np.abs(comp - it["tgt_rgb"]).mean(0)
                 rows.append(dict(
                     name=pathlib.Path(ds.files[i]).name,
