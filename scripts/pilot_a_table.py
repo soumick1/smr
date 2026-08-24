@@ -71,6 +71,22 @@ def main():
             md.append(f"| {row['method']} | " + " | ".join(cells) + " |")
             tex.append("& " + row["method"].replace("_", "\\_") + " & " + " & ".join(cells) + " \\\\")
     tex.append("\\bottomrule\n\\end{tabular}")
+    # standard-protocol summary: ATE per sequence, methods as rows, one
+    # block per backbone (the layout of VGGT-SLAM Table 1 / MASt3R-SLAM)
+    by_bb = {}
+    for p, r in reps:
+        by_bb.setdefault(r["backbone"], {})[r["scene"]] = {row["method"]: row["ate_rmse"] for row in r["rows"]}
+    for bb, scenes in by_bb.items():
+        names = sorted(scenes)
+        md += [f"\n**ATE (m) per sequence --- {bb}**", "", "| method | " + " | ".join(names) + " | avg |",
+               "|" + "---|" * (len(names) + 2)]
+        for m in ORDER[1:]:
+            vals = [scenes[n].get(m) for n in names]
+            if all(v is None for v in vals):
+                continue
+            got = [v for v in vals if v is not None]
+            md.append(f"| {m} | " + " | ".join("---" if v is None else f"{v:.3f}" for v in vals)
+                      + f" | {sum(got) / len(got):.3f} |")
     print("\n".join(md))
     if a.tex:
         out = pathlib.Path(a.tex)

@@ -9,12 +9,16 @@ BACKBONES=${*:-"vggt pi3 dust3r mast3r fast3r stream3r streamvggt monst3r vggt_o
 mkdir -p outputs/reports
 for gt in data/gt/*.npz; do
   scene=$(basename "$gt" .npz)
+  # strides of the stride-based systems in the VGGT-SLAM comparison tables
+  # (ViSTA-SLAM, SLAM-Former): 5 on 7-Scenes, 3 on TUM.  Multi-session
+  # concatenations keep 10 so they stay at 600 keyframes.
   case "$scene" in
-    tum_*) stride=5 ;;
-    *)     stride=10 ;;
+    tum_*)          stride=3 ;;
+    7scenes_*_s0*)  stride=10 ;;
+    *)              stride=5 ;;
   esac
   for bb in $BACKBONES; do
-    tag=outputs/reports/pilotA_${scene}_${bb}
+    tag=outputs/reports/pilotA_${scene}_${bb}_s${stride}
     if [ -f "$tag.json" ]; then echo "skip $tag (exists)"; continue; fi
     echo "=== $scene / $bb (stride $stride) ==="
     python experiments/pilot_a.py --gt "$gt" --backbone "$bb" \
