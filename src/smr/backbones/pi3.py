@@ -20,7 +20,9 @@ identically (plan Sec. Portability).
 """
 from __future__ import annotations
 
+import contextlib
 import pathlib
+import tempfile
 
 import numpy as np
 
@@ -50,6 +52,7 @@ def estimate_K(local_pts, mask, z_min=1e-4):
 @register("pi3")
 class Pi3Backbone(Backbone):
     name = "pi3"
+    pose_convention = "c2w"   # pi3 emits camera-to-world directly; no inversion.
 
     def __init__(self, device="cuda", variant="pi3x", ckpt=None,
                  conf_thr=0.1, use_features=False):
@@ -101,14 +104,27 @@ class Pi3Backbone(Backbone):
         torch = self._torch
         from pi3.utils.basic import load_images_as_tensor
 
+        # pi3's loader takes a DIRECTORY and globs it in sorted order, so a
+        # subset of a folder (what every evaluation harness passes) would
+        # silently load the wrong images.  Stage the exact list in a temp
+        # directory, named to preserve the caller's order.
         paths = [pathlib.Path(p) for p in image_paths]
         parents = {p.parent for p in paths}
-        assert len(parents) == 1, "pi3 adapter expects one image directory"
-        d = parents.pop()
-        imgs = load_images_as_tensor(str(d), interval=1).to(self.device)
+        with contextlib.ExitStack() as stack:
+            if len(parents) == 1 and len(paths) == len(
+                    sorted(parents.copy().pop().glob("*"))):
+                d = parents.pop()                      # whole folder: as-is
+            else:
+                td = stack.enter_context(
+                    tempfile.TemporaryDirectory(prefix="pi3_views_"))
+                for i, src in enumerate(paths):
+                    (pathlib.Path(td) /
+                     f"view_{i:04d}{src.suffix}").symlink_to(src.resolve())
+                d = pathlib.Path(td)
+            imgs = load_images_as_tensor(str(d), interval=1).to(self.device)
         assert imgs.shape[0] == len(paths), (
-            f"their sorted-directory loader found {imgs.shape[0]} images but "
-            f"{len(paths)} paths were passed -- pass the full directory")
+            f"pi3 loader returned {imgs.shape[0]} images for {len(paths)} "
+            f"requested paths")
         with torch.no_grad():
             with torch.amp.autocast('cuda', dtype=self._dtype):
                 res = self._model(imgs[None])

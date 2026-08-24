@@ -25,6 +25,7 @@ from .base import Backbone, BackboneOutput, register
 @register("vggt")
 class VGGTBackbone(Backbone):
     name = "vggt"
+    pose_convention = "w2c"   # VGGT emits camera-from-world extrinsics; we invert.
 
     def __init__(self, device="cuda", model_id="facebook/VGGT-1B",
                  conf_keep=0.8, use_features=False):
