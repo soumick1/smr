@@ -30,7 +30,7 @@ import numpy as np
 from .base import register
 from .pointmap import (PointmapBackbone, RawViews,
                        patch_torchvision_weight_enums,
-                       ensure_module_stub)
+                       import_with_optional_stubs)
 
 
 @register("fast3r")
@@ -59,30 +59,13 @@ class Fast3RBackbone(PointmapBackbone):
 
     @classmethod
     def _import_lit_module(cls):
-        """Import their LightningModule, stubbing training-only deps.
-
-        The real import is tried first, so a complete installation is used
-        untouched.  Only modules on OPTIONAL_AT_INFERENCE are ever stubbed,
-        and anything else re-raises -- a genuinely required dependency must
-        never be silently faked.
-        """
-        stubbed = []
-        for _ in range(8):
-            try:
-                from fast3r.models.multiview_dust3r_module import \
-                    MultiViewDUSt3RLitModule
-                if stubbed:
-                    print(f"  [note] stubbed inference-irrelevant imports "
-                          f"{sorted(set(stubbed))} (install them properly if "
-                          f"you ever train fast3r)")
-                return MultiViewDUSt3RLitModule
-            except ImportError as e:
-                name = getattr(e, "name", None) or ""
-                if name.split(".")[0] not in cls.OPTIONAL_AT_INFERENCE:
-                    raise
-                ensure_module_stub(name, permissive=True)
-                stubbed.append(name)
-        raise ImportError(f"fast3r: still failing after stubbing {stubbed}")
+        """Import their LightningModule, stubbing training-only deps."""
+        def _load():
+            from fast3r.models.multiview_dust3r_module import \
+                MultiViewDUSt3RLitModule
+            return MultiViewDUSt3RLitModule
+        return import_with_optional_stubs(_load, cls.OPTIONAL_AT_INFERENCE,
+                                          "fast3r")
 
     def _load(self):
         import torch
@@ -110,10 +93,19 @@ class Fast3RBackbone(PointmapBackbone):
 
         images = load_images(list(image_paths), size=self.image_size,
                              verbose=False)
+        # Their loss_of_one_batch does `autocast(device_type=device.type)`,
+        # so a plain "cuda" string fails: pass a real torch.device.
+        dev = torch.device(self.device) if isinstance(self.device, str) \
+            else self.device
         with torch.no_grad():
-            out, _ = inference(images, self._model, self.device,
-                               dtype=torch.float32, verbose=False,
-                               profiling=False)
+            # inference() returns `(result, profiling_info)` ONLY when
+            # profiling=True (verified in inference_multiview.py); with
+            # profiling=False it returns the collated result dict directly.
+            # The README's two-value example passes profiling=True.
+            out = inference(images, self._model, dev, dtype=torch.float32,
+                            verbose=False, profiling=False)
+        if isinstance(out, tuple):                 # profiling build
+            out = out[0]
         preds = out["preds"]
         poses_batch, focals = MultiViewDUSt3RLitModule.estimate_camera_poses(
             preds, niter_PnP=self.niter_pnp,

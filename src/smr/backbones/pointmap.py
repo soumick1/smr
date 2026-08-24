@@ -246,22 +246,87 @@ def patch_torchvision_weight_enums():
 def patch_torch_load_legacy_checkpoints():
     """Let torch >= 2.6 load the pre-2.6 checkpoints these repos publish.
 
-    PyTorch 2.6 flipped `torch.load`'s `weights_only` default to True.
-    DUSt3R/MASt3R/MV-DUSt3R checkpoints pickle an `argparse.Namespace` of
-    training args, so they now fail with
-        UnsupportedGlobal: GLOBAL argparse.Namespace was not an allowed global
+    PyTorch 2.6 flipped `torch.load`'s `weights_only` default to True.  The
+    checkpoints published by this family pickle assorted config objects --
+    argparse.Namespace (DUSt3R/MASt3R/MonST3R), omegaconf DictConfig
+    (CUT3R), and so on -- so each one fails on a different "Unsupported
+    global".
 
-    We allowlist exactly that class rather than disabling the safety
-    default wholesale.  Only ever applied to checkpoints fetched from the
-    official URLs recorded on each adapter.  No-op on torch < 2.6.
+    Allowlisting them one at a time is unwinnable: we do not control the
+    call sites (from_pretrained and friends call torch.load internally, so
+    we cannot pass weights_only=False), and every new backbone pickles
+    something new.  So we do both:
+
+      1. allowlist the config classes we know about, for anyone who calls
+         torch.load with weights_only=True explicitly; and
+      2. restore the pre-2.6 DEFAULT for calls that do not specify it.
+
+    The trust basis for (2) is narrow and stated: every checkpoint we load
+    was fetched from the official URL recorded on its adapter class (see
+    `weights_url` / `weights_hub` / `weights_gdrive`), which is exactly the
+    "you got the file from a trusted source" condition PyTorch's own error
+    message describes.  Explicit weights_only=True still wins.
+
+    Idempotent.  No-op on torch < 2.6.
     """
-    import argparse
     import torch
     add = getattr(torch.serialization, "add_safe_globals", None)
     if add is None:                       # torch < 2.6: nothing to do
         return False
-    add([argparse.Namespace])
+    if getattr(torch.load, "__SMR_PATCHED__", False):
+        return False
+
+    import argparse
+    safe = [argparse.Namespace]
+    try:                                   # optional: only if installed
+        from omegaconf.base import ContainerMetadata, Metadata
+        from omegaconf.dictconfig import DictConfig
+        from omegaconf.listconfig import ListConfig
+        from omegaconf.nodes import AnyNode
+        safe += [DictConfig, ListConfig, ContainerMetadata, Metadata, AnyNode]
+    except Exception:
+        pass
+    try:
+        add(safe)
+    except Exception:
+        pass
+
+    original = torch.load
+
+    def load(*args, **kwargs):
+        kwargs.setdefault("weights_only", False)
+        return original(*args, **kwargs)
+
+    load.__SMR_PATCHED__ = True
+    load.__wrapped__ = original
+    torch.load = load
     return True
+
+
+def import_with_optional_stubs(loader, optional, label="backbone"):
+    """Run `loader()`, stubbing ONLY the modules named in `optional`.
+
+    Third-party repos routinely import training, evaluation and
+    visualisation packages at module level -- pl_bolts, open3d, evo, seaborn
+    -- that an inference-only path never touches.  This retries `loader`
+    while permissively stubbing those, and re-raises anything else, so a
+    genuinely required dependency is never silently faked.
+    """
+    stubbed = []
+    for _ in range(10):
+        try:
+            value = loader()
+            if stubbed:
+                print(f"  [note] {label}: stubbed inference-irrelevant "
+                      f"imports {sorted(set(stubbed))}")
+            return value
+        except ImportError as e:
+            name = getattr(e, "name", None) or ""
+            if name.split(".")[0] not in optional:
+                raise
+            ensure_module_stub(name, permissive=True)
+            stubbed.append(name)
+    raise ImportError(f"{label}: still failing after stubbing {stubbed}")
 
 
 def isolate_third_party(prefixes, *subdirs):
@@ -278,6 +343,20 @@ def isolate_third_party(prefixes, *subdirs):
                if any(n == p or n.startswith(p + ".") for p in prefixes)]
     for n in dropped:
         del sys.modules[n]
+
+    # Purging sys.modules is not enough.  These repos bootstrap themselves by
+    # inserting their vendored croco directory into sys.path at import time
+    # (dust3r/model.py does exactly that), and the entry SURVIVES the module
+    # purge -- so a later backbone's `from models.croco import ...` silently
+    # resolves to the first repo's copy.  Drop every third_party path that
+    # does not belong to the repos we were asked to prioritise.
+    keep = {str(REPO_ROOT / "third_party" / s) for s in subdirs}
+    tp = str(REPO_ROOT / "third_party")
+    for entry in list(sys.path):
+        if entry.startswith(tp) and not any(
+                entry == k or entry.startswith(k + "/") for k in keep):
+            sys.path.remove(entry)
+
     for sub in reversed(subdirs):
         d = REPO_ROOT / "third_party" / sub
         if d.is_dir():

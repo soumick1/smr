@@ -28,14 +28,16 @@ if [ -z "$want" ]; then
   cat <<'USAGE'
 usage: bash server/setup_backbones.sh <targets>
   group1   dust3r mast3r                (PYTHONPATH-style, no setup.py)
-  group2   fast3r stream3r cut3r mvdust3r
+  group2   fast3r stream3r
+  group3   streamvggt monst3r vggt_omega
   all      everything
   or name any subset, e.g.:  fast3r stream3r
 USAGE
   exit 0
 fi
 [[ "$want" == "group1" ]] && want="dust3r mast3r"
-[[ "$want" == "group2" ]] && want="fast3r stream3r cut3r mvdust3r"
+[[ "$want" == "group2" ]] && want="fast3r stream3r"
+[[ "$want" == "group3" ]] && want="streamvggt monst3r vggt_omega"
 has () { [[ " $want " == *" $1 "* || " $want " == *" all "* ]]; }
 
 # ---- already integrated -----------------------------------------------
@@ -72,11 +74,28 @@ if has fast3r   ; then clone https://github.com/facebookresearch/fast3r.git fast
                        inst "$TP/fast3r"; fi
 if has stream3r ; then clone https://github.com/NIRVANALAN/STream3R.git STream3R
                        inst "$TP/STream3R"; fi
-if has cut3r    ; then clone https://github.com/CUT3R/CUT3R.git CUT3R
-                       echo "[cut3r] weights are Google Drive only:"
-                       echo "  pip install gdown && cd $TP/checkpoints && \\"
-                       echo "  gdown --fuzzy https://drive.google.com/file/d/1Asz-ZB3FfpzZYwunhQvNPZEUA8XUNAYD/view"; fi
-if has mvdust3r ; then clone https://github.com/facebookresearch/mvdust3r.git mvdust3r; fi
+# ---- group 3 ----------------------------------------------------------
+if has streamvggt; then clone https://github.com/wzzheng/streamvggt.git streamvggt
+                        # their model file imports transformers at module
+                        # level; --no-deps protects torch/numpy, and every
+                        # other transformers dep is already present.
+                        # --no-deps means pip will NOT enforce
+                        # transformers' own pin (tokenizers<=0.23.0), so
+                        # state it explicitly or transformers refuses to
+                        # import -- which also breaks fast3r.
+                        pip install --no-deps transformers \
+                            "tokenizers>=0.22.0,<=0.23.0" \
+                            safetensors regex 2>/dev/null \
+                          && echo "[streamvggt] transformers ready" \
+                          || echo "[streamvggt] pip install --no-deps transformers tokenizers safetensors regex"
+                        echo "[streamvggt] package is at src/streamvggt; the "\
+"adapter adds it to sys.path"; fi
+if has monst3r  ; then clone https://github.com/junyi42/monst3r.git monst3r; fi
+if has vggt_omega; then clone https://github.com/facebookresearch/vggt-omega.git vggt-omega
+                        inst "$TP/vggt-omega"
+                        echo "[vggt_omega] weights are ACCESS-GATED: request at"
+                        echo "  https://huggingface.co/facebook/VGGT-Omega"
+                        echo "  then: export HF_TOKEN=hf_...  before fetching"; fi
 
 echo
 echo "cloned into $TP"

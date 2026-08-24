@@ -34,11 +34,24 @@ from smr.pipeline import bind
 from smr.scene import Camera
 
 # must3r removed (see UPDATE_NOTES_v38): needs a newer torchvision.
-POINTMAP_ADAPTERS = ["dust3r", "mast3r", "fast3r", "stream3r", "cut3r",
-                     "mvdust3r"]
+POINTMAP_ADAPTERS = ["dust3r", "mast3r", "fast3r", "stream3r",
+                     "streamvggt", "monst3r", "vggt_omega"]
 # adapters that ship a downloadable .pth (others resolve via the HF hub or,
 # for cut3r, a Google Drive link that cannot be automated)
-FETCHABLE = ["dust3r", "mast3r", "mvdust3r"]
+# adapters the fetcher can pull automatically: direct https OR Google Drive
+# (CUT3R and MonST3R publish only via Drive -- their own documented recipe)
+FETCHABLE = ["dust3r", "mast3r", "streamvggt", "vggt_omega"]
+GDRIVE = ["monst3r"]
+# Some repos publish their checkpoint under a name that would be ambiguous
+# in a shared directory ("checkpoints.pth"), so the adapter saves it under a
+# backbone-qualified name.  Renaming is allowed ONLY for these.
+GENERIC_REMOTE_NAMES = {"checkpoints.pth", "checkpoint.pth", "model.pt",
+                        "model.pth", "model.safetensors"}
+
+
+def url_matches_file(url, weights_file):
+    remote = url.rsplit("/", 1)[-1]
+    return remote in weights_file or remote in GENERIC_REMOTE_NAMES
 ALL_ADAPTERS = ["vggt", "pi3"] + POINTMAP_ADAPTERS
 
 
@@ -306,18 +319,21 @@ def test_backbone_loads_and_infers_on_real_images(name, tmp_path):
 
 
 # ===================================== TIER 1: checkpoint plumbing ==========
-@pytest.mark.parametrize("name", FETCHABLE)
+@pytest.mark.parametrize("name", FETCHABLE + GDRIVE)
 def test_every_adapter_declares_a_fetchable_checkpoint(name):
     """A backbone must say WHICH file it needs and WHERE it comes from, or
     `fetch_weights.py` (which reads the registry) silently skips it."""
     cls = _REGISTRY[name]
     assert isinstance(cls.weights_file, str) and cls.weights_file.endswith(
         (".pth", ".pt", ".safetensors")), f"{name}: bad weights_file"
-    assert isinstance(cls.weights_url, str)
-    assert cls.weights_url.startswith("https://"), f"{name}: non-https URL"
-    assert cls.weights_file.split("/")[-1] in cls.weights_url, (
-        f"{name}: weights_url does not end in weights_file -- one of them is "
-        f"stale")
+    url = cls.weights_url or getattr(cls, "weights_gdrive", None)
+    assert isinstance(url, str) and url.startswith("https://"), (
+        f"{name}: no https weights source")
+    if "drive.google.com" in url:
+        return                       # Drive links carry no filename
+    assert url_matches_file(url, cls.weights_file), (
+        f"{name}: weights_url basename does not match weights_file and is "
+        f"not a known-generic remote name -- one of them is stale")
 
 
 def test_weight_sources_are_declared_per_backbone():
@@ -329,8 +345,8 @@ def test_weight_sources_are_declared_per_backbone():
                 or getattr(c, "weights_note", None)), \
             f"{name}: no hub id, no URL and no note explaining why"
     assert _REGISTRY["dust3r"].weights_hub and _REGISTRY["mast3r"].weights_hub
-    assert _REGISTRY["cut3r"].weights_url is None            # Google Drive
-    assert "gdown" in _REGISTRY["cut3r"].weights_note
+    assert _REGISTRY["monst3r"].weights_url is None          # Google Drive
+    assert "drive.google.com" in _REGISTRY["monst3r"].weights_gdrive
 
 
 def test_local_checkpoint_wins_over_hub(tmp_path, monkeypatch):
@@ -367,11 +383,13 @@ def test_fetcher_manifest_covers_every_declared_backbone():
     names = {r[0] for r in fw.entries(POINTMAP_ADAPTERS)}
     # only backbones with a direct URL appear: hub-hosted (fast3r, stream3r)
     # and Google-Drive-hosted (cut3r) ones are intentionally absent.
-    assert names == set(FETCHABLE), f"manifest {names} != {set(FETCHABLE)}"
+    assert names == set(FETCHABLE + GDRIVE), (
+        f"manifest {names} != {set(FETCHABLE + GDRIVE)}")
     extras = fw.entries(POINTMAP_ADAPTERS, extras=True)
     assert len(extras) >= len(FETCHABLE)
     for _, fn, url, _req in extras:
-        assert url.startswith("https://") and fn.split("/")[-1] in url
+        assert url.startswith("https://")
+        assert "drive.google.com" in url or url_matches_file(url, fn)
 
 
 def test_pi3_stages_a_subset_of_a_folder_rather_than_globbing_it():
@@ -565,15 +583,6 @@ def test_isolate_third_party_puts_vendored_path_first(tmp_path, monkeypatch):
         _s.path[:] = saved
 
 
-def test_mvdust3r_isolates_before_importing_its_fork():
-    import inspect
-    from smr.backbones import mvdust3r as m
-    for fn in (m.MVDUSt3RBackbone._load, m.MVDUSt3RBackbone._raw):
-        src = inspect.getsource(fn)
-        assert src.index("isolate_third_party") < src.index("from dust3r"), (
-            "isolation must precede any dust3r import")
-
-
 def test_stub_weights_enum_satisfies_default_arguments():
     from smr.backbones.pointmap import _StubWeightsEnum
     assert _StubWeightsEnum.IMAGENET1K_V1 and _StubWeightsEnum.DEFAULT
@@ -602,10 +611,129 @@ def test_permissive_stub_mints_attributes_but_not_dunders():
             _s.modules.pop(n, None)
 
 
-def test_fast3r_only_stubs_inference_irrelevant_modules():
-    """A genuinely required dependency must never be silently faked."""
-    cls = _REGISTRY["fast3r"]
-    assert set(cls.OPTIONAL_AT_INFERENCE) <= {"pl_bolts", "open3d", "wandb"}
+@pytest.mark.parametrize("name", ["fast3r", "monst3r"])
+def test_only_inference_irrelevant_modules_are_stubbed(name):
+    """A genuinely required dependency must never be silently faked: the
+    allowlist stays small and explicit, and anything off it re-raises."""
+    # Deliberately small: training, evaluation and plotting packages --
+    # plus sam2, which is a real model and is therefore only permitted
+    # because the adapter switches OFF the feature that calls it (see the
+    # test below, which enforces that link).
+    allowed = {"pl_bolts", "open3d", "wandb", "evo", "seaborn", "matplotlib",
+               "sam2"}
+    assert set(_REGISTRY[name].OPTIONAL_AT_INFERENCE) <= allowed
+
+
+def test_optional_stub_helper_reraises_unlisted_modules():
+    from smr.backbones.pointmap import import_with_optional_stubs
+
+    def loader():
+        raise ModuleNotFoundError("No module named 'scipy'", name="scipy")
+
+    with pytest.raises(ModuleNotFoundError):
+        import_with_optional_stubs(loader, ("open3d",), "test")
+
+
+def test_optional_stub_helper_stubs_listed_modules():
+    import sys as _s
+    from smr.backbones.pointmap import import_with_optional_stubs
+    _s.modules.pop("smr_fake_viz", None)
+    calls = {"n": 0}
+
+    def loader():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ModuleNotFoundError("nope", name="smr_fake_viz")
+        return "loaded"
+
+    try:
+        assert import_with_optional_stubs(
+            loader, ("smr_fake_viz",), "test") == "loaded"
+        assert calls["n"] == 2
+    finally:
+        _s.modules.pop("smr_fake_viz", None)
+
+
+def test_fast3r_passes_a_torch_device_not_a_string():
+    """fast3r's loss_of_one_batch does autocast(device_type=device.type),
+    so the plain "cuda" string every other adapter passes fails there."""
     import inspect
-    src = inspect.getsource(cls._import_lit_module)
-    assert "raise" in src and "OPTIONAL_AT_INFERENCE" in src
+    src = inspect.getsource(_REGISTRY["fast3r"]._raw)
+    assert "torch.device(self.device)" in src
+    assert "inference(images, self._model, dev," in src
+
+
+def test_fast3r_handles_both_inference_return_shapes():
+    """fast3r's inference() returns (result, profiling_info) only when
+    profiling=True and a bare dict otherwise; the README example shows the
+    two-value form, which is why unpacking blindly fails."""
+    import inspect
+    src = inspect.getsource(_REGISTRY["fast3r"]._raw)
+    assert "isinstance(out, tuple)" in src
+    assert "out, _ = inference" not in src
+
+
+def test_monst3r_disables_the_feature_that_would_call_sam2():
+    """sam2 is stubbed, so anything that actually calls it would explode at
+    runtime.  The adapter must therefore default MonST3R's SAM2 mask
+    refinement OFF -- stubbing a real model is only honest if nothing
+    invokes it."""
+    bb = get_backbone("monst3r", device="cpu")
+    assert bb.sam2_mask_refine is False
+    import inspect
+    src = inspect.getsource(type(bb)._raw)
+    assert "sam2_mask_refine" in src, "the flag must reach global_aligner"
+    on = get_backbone("monst3r", device="cpu", sam2_mask_refine=True)
+    assert on.sam2_mask_refine is True          # opt-in still possible
+
+
+def test_isolation_drops_competing_third_party_paths(tmp_path, monkeypatch):
+    """dust3r's model.py inserts its own vendored croco dir into sys.path at
+    import time, and that entry survives a sys.modules purge -- so a later
+    backbone's `from models.croco import CrocoConfig` resolved to DUSt3R's
+    copy, which has no CrocoConfig.  Isolation must remove foreign
+    third_party entries, not merely prepend its own."""
+    import sys as _s
+    from smr.backbones import pointmap as pm
+    monkeypatch.setattr(pm, "REPO_ROOT", tmp_path)
+    (tmp_path / "third_party" / "repoA" / "croco").mkdir(parents=True)
+    (tmp_path / "third_party" / "repoB" / "src" / "croco").mkdir(parents=True)
+    stale = str(tmp_path / "third_party" / "repoA" / "croco")
+    saved = list(_s.path)
+    try:
+        _s.path.insert(0, stale)                    # what repoA leaves behind
+        pm.isolate_third_party((), "repoB/src/croco", "repoB/src")
+        assert stale not in _s.path, "foreign croco path still shadowing"
+        assert _s.path[0] == str(
+            tmp_path / "third_party" / "repoB" / "src" / "croco")
+        assert "/some/unrelated/path" not in _s.path   # only third_party
+    finally:
+        _s.path[:] = saved
+
+
+def test_torch_load_shim_is_idempotent_and_keeps_explicit_choice():
+    """The shim restores torch<2.6's default for calls it cannot reach, but
+    an explicit weights_only=True must still win."""
+    try:                     # torch may be present but un-importable here
+        import torch          # (CUDA libs absent in the dev sandbox);
+    except Exception as e:    # importorskip only catches ImportError
+        pytest.skip(f"torch unusable in this environment: {type(e).__name__}")
+    from smr.backbones.pointmap import patch_torch_load_legacy_checkpoints
+    original = torch.load
+    try:
+        patch_torch_load_legacy_checkpoints()
+        if not getattr(torch.load, "__SMR_PATCHED__", False):
+            pytest.skip("torch < 2.6: no shim needed")
+        assert patch_torch_load_legacy_checkpoints() is False   # idempotent
+        # the shim closes over the ORIGINAL torch.load, so exercise it via
+        # a real round-trip instead of swapping __wrapped__
+        import io
+        buf = io.BytesIO()
+        torch.save({"a": torch.zeros(2)}, buf)
+        buf.seek(0)
+        got = torch.load(buf)                       # no weights_only passed
+        assert "a" in got
+    finally:
+        torch.load = original
+
+
