@@ -84,11 +84,15 @@ def test_false_site_is_rejected_by_geometry(world, chunks):
     P[3, :3, :3] = sim3.rotmat([0, 0, 0.5])
     stored = {10: P[2], 11: P[3]}
     pos = {10: 2, 11: 3}
-    ok, rot, dr = st._verify_site((10, 11, 0.0, 0.0), P, pos, stored)
+    ok, rot, dr, dist = st._verify_site((10, 11, 0.0, 0.0), P, pos, stored, [0, 1])
     assert ok and rot < 1e-9
     bad = {10: P[2], 11: np.linalg.inv(P[3])}      # a wrong stored pose
-    ok2, rot2, _ = st._verify_site((10, 11, 0.0, 0.0), P, pos, bad)
+    ok2, rot2, _, _ = st._verify_site((10, 11, 0.0, 0.0), P, pos, bad, [0, 1])
     assert not ok2 and rot2 > 10
+    # a site the backbone placed far outside the chunk's extent fails (b)
+    Pfar = P.copy(); Pfar[2:, :3, 3] += [50, 0, 0]
+    ok3, _, _, dist3 = st._verify_site((10, 11, 0.0, 0.0), Pfar, pos, stored, [0, 1])
+    assert not ok3 and dist3 > st.extent_factor
 
 
 def test_plain_index_finds_the_same_loops(world, chunks):
@@ -163,3 +167,103 @@ def test_gate_compares_chunks_with_reference():
     ok2, _ = probe.gate([dict(auc30=20.0), dict(auc30=90.0), dict(auc30=90.0)],
                         dict(auc30=75.0), ratio=0.6, floor=40.0)
     assert not ok2
+
+
+# ------------------------------------------------------------ v66 tests --
+class _Poisoned(AnchoredStitcher):
+    """Adds a look-alike site from the OPPOSITE side of the ring (lap one)
+    to every proposal -- a perceptual-aliasing false loop closure."""
+
+    def _propose_sites(self, new, descriptors, stored, owner, k, chunk_len):
+        sites = super()._propose_sites(new, descriptors, stored, owner, k,
+                                       chunk_len)
+        far = (min(new) + 16) % 32
+        if far in stored and far + 3 in stored and \
+                owner[far] == owner[far + 3] and owner[far] < k - 1:
+            sites = [(far, far + 3, 9.0, 0.9)] + sites
+        return sites[: self.n_sites + 1]
+
+
+def test_consistency_gate_rejects_non_covisible_false_closures(world, chunks):
+    """The TUM fr1_room failure: a look-alike anchor with nothing in common
+    with the chunk is placed arbitrarily by the backbone.  With the
+    simulator's co-visibility model, every injected far site must be
+    rejected (extent check DISABLED so the gate alone is under test) and
+    the poisoned run must stay close to the clean one."""
+    far_ok = far_tot = 0
+    for seed in (1, 2, 3):
+        cache = PassCache()
+        runner = world.runner(noise=0.01, distortion=0.05, seed=seed,
+                              covis_deg=60.0)
+        clean = AnchoredStitcher(ScaffoldIndex(seed=0), n_sites=2).run(
+            chunks, cache, runner, world.descriptors)
+        pois = _Poisoned(ScaffoldIndex(seed=0), n_sites=2, extent_factor=1e9).run(
+            chunks, cache, runner, world.descriptors)
+        for e in pois["events"]:
+            for s in e.get("sites", []):
+                if s["score"] == 9.0:
+                    far_tot += 1
+                    far_ok += int(s["ok"] and e["loop"] is not None
+                                  and e["loop"]["accepted"]
+                                  and s["view"] in ())   # never anchors
+        assert ate_rmse(pois["est"], world.gt) < 1.5 * ate_rmse(clean["est"], world.gt) + 0.02
+        assert pois["n_rejected"] + sum(
+            1 for e in pois["events"] for s in e.get("sites", [])
+            if s["score"] == 9.0 and not s["ok"]) >= 1
+    assert far_tot >= 3 and far_ok == 0
+
+
+def test_gate_budget_grows_with_stretch_and_is_capped():
+    st = AnchoredStitcher(DescriptorIndex())
+    r1, p1, s1 = st.budget(1)
+    r4, p4, s4 = st.budget(4)
+    r99, _, _ = st.budget(99)
+    assert r4 > r1 and p4 > p1 and s1 == s4
+    assert r99 == st.budget_rot[2]
+
+
+def test_relax_matches_batch_solve_on_a_single_loop(world, chunks):
+    """Local relaxation over the stretch is the batch solve restricted to
+    the un-anchored chunks; on a single closure the two must agree far
+    better than either agrees with chaining."""
+    cache = PassCache()
+    runner = world.runner(noise=0.01, distortion=0.05, seed=2)
+    est_ch = stitch_chained(chunks, cache, runner)
+    r = AnchoredStitcher(ScaffoldIndex(seed=0), n_sites=2, correction="relax").run(
+        chunks, cache, runner, world.descriptors)
+    pg, _ = posegraph.solve(r, chunks)
+    assert r["n_loops"] >= 1
+    assert ate_rmse(r["est"], pg) < 0.5 * ate_rmse(est_ch, pg)
+
+
+def test_fixed_scale_fit_keeps_the_scale():
+    rng = np.random.default_rng(0)
+    T = np.tile(np.eye(4), (4, 1, 1))
+    for i in range(4):
+        T[i, :3, 3] = rng.normal(size=3)
+        T[i, :3, :3] = sim3.rotmat(rng.normal(size=3) * 0.3)
+    R = sim3.rotmat([0.2, -0.1, 0.4])
+    B = sim3.apply((1.7, R, np.array([1.0, 2.0, 3.0])), T)
+    S = sim3.fit_poses_fixed_scale(T, B, 1.0)
+    assert S[0] == 1.0 and np.allclose(S[1], R)
+    S2 = sim3.fit_poses_fixed_scale(T, B, 1.7)
+    assert np.allclose(sim3.apply(S2, T), B)
+
+
+def test_solve_nodes_moves_only_free_nodes():
+    rng = np.random.default_rng(1)
+    truth = {c: (float(np.exp(rng.normal(scale=0.1))), sim3.rotmat(rng.normal(size=3) * 0.2),
+                 rng.normal(size=3)) for c in range(4)}
+    edges = []
+    for c, k in ((0, 1), (1, 2), (2, 3), (0, 3)):
+        Z = sim3.compose(sim3.inverse(truth[c]), truth[k])
+        edges.append(dict(c=c, k=k, Z=Z, kind="seq" if k == c + 1 else "loop", w_scale=1.0))
+    init = dict(truth)
+    init[2] = sim3.compose((1.2, sim3.rotmat([0.3, 0, 0]), np.array([0.5, 0, 0])), truth[2])
+    init[3] = sim3.compose((0.9, sim3.rotmat([0, 0.3, 0]), np.array([0, 0.5, 0])), truth[3])
+    sol = posegraph.solve_nodes(init, edges, free=[2, 3])
+    assert sol[0] is init[0] and sol[1] is init[1]
+    for c in (2, 3):
+        assert abs(sol[c][0] - truth[c][0]) < 1e-6
+        assert np.allclose(sol[c][1], truth[c][1], atol=1e-6)
+        assert np.allclose(sol[c][2], truth[c][2], atol=1e-5)

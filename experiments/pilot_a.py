@@ -83,14 +83,19 @@ def load_inputs(a):
         runner = None                      # built after keyframing (paths)
 
     def desc_fn(key):
-        cache = pathlib.Path(a.cache).with_suffix(".desc.npy") if a.cache else None
+        cache = (pathlib.Path(a.cache).with_suffix(f".desc_{a.descriptor}.npy")
+                 if a.cache else None)
         sel = [paths[i] for i in key]
         if cache is not None and cache.exists():
             d = np.load(cache, allow_pickle=True).item()
             if d.get("paths") == sel:
                 return d["desc"]
-        print(f"  computing {len(sel)} view descriptors from the images ...")
-        desc = image_descriptors(sel)
+        print(f"  computing {len(sel)} {a.descriptor} view descriptors ...")
+        if a.descriptor == "dino":
+            from smr.stitch.passes import dino_descriptors
+            desc = dino_descriptors(sel, device=a.device)
+        else:
+            desc = image_descriptors(sel)
         if cache is not None:
             cache.parent.mkdir(parents=True, exist_ok=True)
             np.save(cache, dict(paths=sel, desc=desc), allow_pickle=True)
@@ -150,6 +155,15 @@ def main():
                     help="anchor sites per chunk (2 frames each) proposed by "
                          "memory; 0 reproduces the chained baseline")
     ap.add_argument("--rows", default="chained,smr,smr_pgo,classical")
+    ap.add_argument("--correction", default="relax",
+                    choices=["relax", "distribute", "jump", "none"],
+                    help="how an accepted closure is applied in the smr row")
+    ap.add_argument("--remeasure", action="store_true",
+                    help="verify each site with a 4-frame second pass "
+                         "(ablation; off by default, see notes)")
+    ap.add_argument("--descriptor", default="rgb", choices=["rgb", "dino"],
+                    help="place descriptor: pooled RGB (no model) or "
+                         "DINOv2 ViT-S/14 CLS (first run downloads weights)")
     ap.add_argument("--probe-only", action="store_true")
     ap.add_argument("--ceiling", action="store_true",
                     help="also measure the largest single pass that fits")
@@ -245,8 +259,14 @@ def main():
     rows, results = [], {}
 
     def add_row(name, est, passes, extra):
-        cols = summarise_long(est, gt, passes, revisits, chunk_len=a.chunk,
-                              rpe_dist=rpe_dist)
+        # AUC split by CHUNK WINDOW for every row (identical pair sets, so
+        # AUCin is the pass-through monitor); the split by pass is kept in
+        # the JSON as auc_within_pass / auc_cross_pass.
+        cols = summarise_long(est, gt, [list(c) for c in chunks], revisits,
+                              chunk_len=a.chunk, rpe_dist=rpe_dist)
+        from smr.eval.trajectory import auc_split
+        bp = auc_split(est, gt, passes)
+        cols.update(auc_within_pass=bp["auc_within"], auc_cross_pass=bp["auc_cross"])
         secs, peak = cache.totals(passes)
         cols.update(method=name, backbone=a.backbone, n_passes=len(passes),
                     frames_per_pass=float(np.mean([len(p) for p in passes])),
@@ -255,57 +275,65 @@ def main():
         rows.append(cols)
         return cols
 
+    if ceiling and ceiling.get("n") == len(key):
+        sub = list(range(len(key)))
+        add_row("ceiling", cache.get(sub, runner)["poses"], [sub],
+                dict(n_loops=0, n_edges=0, n_rejected=0))
     if "chained" in want:
         est = stitch_chained(chunks, cache, runner)
         add_row("chained", est, [list(c) for c in chunks],
-                dict(n_loops=0, n_edges=len(chunks) - 1))
+                dict(n_loops=0, n_edges=len(chunks) - 1, n_rejected=0))
+    dim = descriptors.shape[1]
+    common = dict(n_sites=a.sites, remeasure=a.remeasure, verbose=a.verbose)
+
+    def scaffold():
+        return ScaffoldIndex(N_h=a.N_h, torus_N=a.torus_N, seed=a.seed,
+                             desc_dim=dim)
+
+    def loops_of(r):
+        return dict(n_loops=r["n_loops"], n_rejected=r["n_rejected"],
+                    n_edges=len(r["edges"]))
+
     if any(r in want for r in ("smr", "smr_pgo")):
-        st = AnchoredStitcher(ScaffoldIndex(N_h=a.N_h, torus_N=a.torus_N,
-                                            seed=a.seed),
-                              n_sites=a.sites, correction="distribute",
-                              verbose=a.verbose)
+        st = AnchoredStitcher(scaffold(), correction=a.correction, **common)
         t1 = time.time()
         r = st.run(chunks, cache, runner, descriptors)
         results["smr"] = r
         if "smr" in want:
-            add_row("smr", r["est"], r["passes"],
-                    dict(n_loops=r["n_loops"], n_edges=len(r["edges"]),
-                         stitch_secs=round(time.time() - t1 - cache.totals(r["passes"])[0], 2)))
+            add_row("smr", r["est"], r["passes"], dict(
+                stitch_secs=round(time.time() - t1 - cache.totals(r["passes"])[0], 2),
+                **loops_of(r)))
         if "smr_pgo" in want:
             t2 = time.time()
             pg, info = posegraph.solve(r, chunks)
             add_row("smr_pgo", pg, r["passes"],
-                    dict(n_loops=r["n_loops"], n_edges=info["n_edges"],
-                         pgo_secs=round(time.time() - t2, 2), pgo_cost=info["cost"]))
+                    dict(pgo_secs=round(time.time() - t2, 2), pgo_cost=info["cost"],
+                         **loops_of(r)))
     if "classical" in want:
-        st = AnchoredStitcher(DescriptorIndex(), n_sites=a.sites,
-                              correction="none", verbose=a.verbose)
+        st = AnchoredStitcher(DescriptorIndex(), correction="none", **common)
         r = st.run(chunks, cache, runner, descriptors)
         results["classical"] = r
         t2 = time.time()
         pg, info = posegraph.solve(r, chunks)
         add_row("classical", pg, r["passes"],
-                dict(n_loops=r["n_loops"], n_edges=info["n_edges"],
-                     pgo_secs=round(time.time() - t2, 2), pgo_cost=info["cost"]))
+                dict(pgo_secs=round(time.time() - t2, 2), pgo_cost=info["cost"],
+                     **loops_of(r)))
     if "smr_jump" in want:
-        st = AnchoredStitcher(ScaffoldIndex(N_h=a.N_h, torus_N=a.torus_N,
-                                            seed=a.seed),
-                              n_sites=a.sites, correction="jump")
-        r = st.run(chunks, cache, runner, descriptors)
-        add_row("smr_jump", r["est"], r["passes"],
-                dict(n_loops=r["n_loops"], n_edges=len(r["edges"])))
+        r = AnchoredStitcher(scaffold(), correction="jump", **common).run(
+            chunks, cache, runner, descriptors)
+        results["smr_jump"] = r
+        add_row("smr_jump", r["est"], r["passes"], loops_of(r))
     if "plain" in want:
-        st = AnchoredStitcher(DescriptorIndex(), n_sites=a.sites,
-                              correction="distribute")
-        r = st.run(chunks, cache, runner, descriptors)
-        add_row("plain", r["est"], r["passes"],
-                dict(n_loops=r["n_loops"], n_edges=len(r["edges"])))
+        r = AnchoredStitcher(DescriptorIndex(), correction=a.correction,
+                             **common).run(chunks, cache, runner, descriptors)
+        results["plain"] = r
+        add_row("plain", r["est"], r["passes"], loops_of(r))
 
     # ------------------------------------------------------------ table --
     unit = "m" if meta["metric"] else "u"
     hdr = (f"{'method':<10}{'ATE(' + unit + ')':>9}{'RPE-t1':>8}{'RPE-r1':>8}"
            f"{'RPEtC':>8}{'RPErC':>8}{'AUCall':>8}{'AUCin':>7}{'AUCx':>7}"
-           f"{'loopR':>7}{'loopT':>8}{'scl':>6}{'loops':>6}{'f/pass':>7}"
+           f"{'loopR':>7}{'loopT':>8}{'scl':>6}{'loops':>6}{'rej':>5}{'f/pass':>7}"
            f"{'s/frm':>7}")
     print("\n" + "=" * len(hdr)); print(hdr); print("-" * len(hdr))
     for r in rows:
@@ -314,18 +342,22 @@ def main():
               f"{r['rpe_rot_chunk_deg']:>8.2f}{r['auc_all']:>8.1f}"
               f"{r['auc_within']:>7.1f}{r['auc_cross']:>7.1f}"
               f"{r['loop_rot_deg']:>7.2f}{r['loop_trans']:>8.4f}"
-              f"{r['scale_drift_max']:>6.2f}{r['n_loops']:>6d}"
+              f"{r['scale_drift_max']:>6.2f}{r['n_loops']:>6d}{r['n_rejected']:>5d}"
               f"{r['frames_per_pass']:>7.1f}{r['sec_per_frame']:>7.3f}")
     print("=" * len(hdr))
     print("  RPE-t1/r1: adjacent keyframes (backbone-dominated). RPEtC/rC: "
-          "over one chunk length.\n  AUCin: pairs that shared a pass "
-          "(pass-through, must match across rows sharing passes).\n  AUCx: "
-          "pairs that never shared a pass (the stitcher). loopR/loopT: "
+          "over one chunk length.\n  AUCin: pairs inside one chunk window "
+          "(pass-through; must stay close across rows).\n  AUCx: pairs "
+          "from different chunks (the stitcher). loopR/loopT: "
           "relative-pose error across GT revisit pairs.\n  scl: max |log| "
-          "local/global scale ratio. loops: accepted loop closures.")
-    if len(rows) >= 2 and rows[0]["method"] == "chained":
-        for r in rows[1:]:
-            b = rows[0]
+          "local/global scale ratio. loops/rej: closures accepted / rejected "
+          "by the consistency gate.")
+    base = [r for r in rows if r["method"] == "chained"]
+    if base and len(rows) >= 2:
+        b = base[0]
+        for r in rows:
+            if r["method"] == "chained":
+                continue
             print(f"  {r['method']:<10} vs chained: ATE x{b['ate_rmse'] / max(r['ate_rmse'], 1e-12):.2f}"
                   f"  loop-rot x{b['loop_rot_deg'] / max(r['loop_rot_deg'], 1e-9):.2f}"
                   f"  AUC-cross {b['auc_cross']:.1f} -> {r['auc_cross']:.1f}")

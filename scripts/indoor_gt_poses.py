@@ -40,6 +40,17 @@ sys.path.insert(0, str(ROOT / "src"))
 
 # ------------------------------------------------------------- 7-Scenes --
 def load_sevenscenes(root, scene, seq):
+    """seq may be an int or a list of ints: sequences of one scene share a
+    single world frame (KinectFusion tracked them in one scene model), so
+    concatenating them yields a long multi-session trajectory whose
+    cross-session revisits carry ground truth.  Frame ids are offset by
+    100000 x seq so they stay unique."""
+    if isinstance(seq, (list, tuple)):
+        parts = [load_sevenscenes(root, scene, s) for s in seq]
+        return (np.concatenate([p[0] for p in parts]),
+                sum([p[1] for p in parts], []),
+                np.concatenate([p[2] for p in parts]),
+                sum([p[3] for p in parts], []))
     d = pathlib.Path(root).expanduser() / scene / f"seq-{int(seq):02d}"
     if not d.is_dir():
         raise SystemExit(f"{d} not found (expected <root>/<scene>/seq-XX)")
@@ -59,7 +70,7 @@ def load_sevenscenes(root, scene, seq):
                 abs(np.linalg.det(P[:3, :3]) - 1.0) > 1e-2:
             dropped.append((fid, "invalid pose"))
             continue
-        poses.append(P); paths.append(str(img)); ids.append(fid)
+        poses.append(P); paths.append(str(img)); ids.append(fid + 100000 * int(seq))
     if not poses:
         raise SystemExit(f"no valid frames under {d}")
     return np.stack(poses), paths, np.array(ids), dropped
@@ -155,7 +166,9 @@ def main():
     ap.add_argument("dataset", choices=["sevenscenes", "tum"])
     ap.add_argument("--root", required=True)
     ap.add_argument("--scene", default="chess", help="7-Scenes scene name")
-    ap.add_argument("--seq", type=int, default=1, help="7-Scenes seq number")
+    ap.add_argument("--seq", default="1",
+                    help="7-Scenes seq number, or a comma list (1,2,3) to "
+                         "concatenate sessions of the same scene")
     ap.add_argument("--sequence", default="rgbd_dataset_freiburg1_desk",
                     help="TUM sequence directory name")
     ap.add_argument("--max-dt", type=float, default=0.02)
@@ -169,8 +182,11 @@ def main():
     a = ap.parse_args()
 
     if a.dataset == "sevenscenes":
-        poses, paths, ids, dropped = load_sevenscenes(a.root, a.scene, a.seq)
-        scene, seq = a.scene, f"seq-{a.seq:02d}"
+        seqs = [int(x) for x in str(a.seq).split(",") if x]
+        poses, paths, ids, dropped = load_sevenscenes(
+            a.root, a.scene, seqs if len(seqs) > 1 else seqs[0])
+        scene = a.scene if len(seqs) == 1 else f"{a.scene}_s" + "".join(f"{x:02d}" for x in seqs)
+        seq = "+".join(f"seq-{x:02d}" for x in seqs)
     else:
         poses, paths, ids, dropped = load_tum(a.root, a.sequence, a.max_dt)
         scene, seq = a.sequence, ""

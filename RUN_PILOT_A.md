@@ -1,8 +1,9 @@
 # Pilot A — long-horizon global consistency. Run these on the server.
 
 Everything below runs REAL backbones on REAL images against REAL
-ground-truth poses. Nothing here is simulated. (v65: the mechanism and
-the protocol were rebuilt; see UPDATE_NOTES_v65.md for why.)
+ground-truth poses. Nothing here is simulated. (v65 rebuilt the mechanism
+and protocol; v66 added the consistency gate, local relaxation, the DINO
+descriptor and multi-session sequences -- see UPDATE_NOTES_v66.md.)
 
 --------------------------------------------------------------------
 ## Step 0 — sanity, no GPU (about 1 minute)
@@ -10,7 +11,7 @@ the protocol were rebuilt; see UPDATE_NOTES_v65.md for why.)
     cd ~/smr && source .venv/bin/activate
     python -m pytest -q
 
-Expected: 154 passed, 10 skipped. The new tests pin the metrics to
+Expected on the server: 147 passed, 23 skipped. The new tests pin the metrics to
 hand-derivable cases, prove that `--sites 0` reproduces plain chaining to
 machine precision, and show on a rendered two-lap world that anchoring
 bounds the loop error where chaining compounds it. If anything fails,
@@ -105,16 +106,19 @@ Rows (all from the same cached passes where they share them):
   smr         memory-anchored streaming loop closure (the mechanism)
   smr_pgo     batch pose-graph solve on the SAME edges — the upper bound
   classical   descriptor-NN loop detection + batch PGO, no scaffold
-  smr_jump    ablation: anchors but no correction distribution
+  smr_jump    ablation: anchors, chunk snapped to them, nothing relaxed
   plain       ablation: plain descriptor index instead of the scaffold
+Options: --correction relax|distribute|jump|none, --descriptor rgb|dino,
+--remeasure (4-frame second-pass verification, ablation).
+A `ceiling` row appears when the single pass covers every keyframe.
 --ceiling also measures the largest single pass that fits (OOM bisection)
 and its quality: the backbone's own ceiling and where chunking becomes
 mandatory.
 
 Columns: ATE (m); RPE at 1 keyframe and at 1 chunk; AUC@30 pooled /
-within-pass / cross-pass; loop-closure rotation and translation error
-over GT revisit pairs; max local-scale drift; accepted loops; frames per
-pass; seconds per frame. The `vs chained` lines are the headline ratios.
+within-chunk / cross-chunk; loop-closure rotation and translation error
+over GT revisit pairs; max local-scale drift; closures accepted /
+rejected by the consistency gate; frames per pass; seconds per frame. The `vs chained` lines are the headline ratios.
 
 WHAT TO LOOK FOR
   * AUCin should be close across rows (it is the backbone's within-pass
@@ -160,3 +164,16 @@ bounded by roughly one pass of backbone error once the first loop closes.
 If the ratio is flat, the mechanism is not doing its job, and we say so.
 
 Paste the console output of Steps 3 and 4 back to me verbatim.
+
+--------------------------------------------------------------------
+## Step 7 — multi-session sequences (where single passes cannot fit)
+--------------------------------------------------------------------
+    python scripts/indoor_gt_poses.py sevenscenes --root ~/7scenes --scene chess \
+        --seq 1,2,3,4,5,6 --convention c2w --out data/gt/7scenes_chess_s0106.npz
+    python experiments/pilot_a.py --gt data/gt/7scenes_chess_s0106.npz --backbone vggt \
+        --keyframe-stride 10 --chunk 16 --overlap 8 --sites 2 \
+        --rows chained,smr,smr_pgo --ceiling --verbose
+
+Sessions of one 7-Scenes scene share a world frame, so this is a 6000-
+frame trajectory with cross-session revisits and ground truth.  The
+ceiling bisection reports the largest single pass that fits.

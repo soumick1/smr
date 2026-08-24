@@ -66,17 +66,39 @@ class SimulatedRunner:
     Never a result: any report built on this is marked SIMULATED.
     """
 
-    def __init__(self, gt_poses, noise=0.02, distortion=0.0, seed=0):
+    def __init__(self, gt_poses, noise=0.02, distortion=0.0, seed=0,
+                 covis_deg=None, n_core=16):
         self.gt = np.asarray(gt_poses, float)
         self.noise = float(noise)
         self.distortion = float(distortion)
         self.rng = np.random.default_rng(seed)
+        self.covis_deg = covis_deg
+        self.n_core = n_core
 
     def __call__(self, idx):
         from .sim3 import rotmat, apply
         t0 = time.time()
         p = regauge(self.gt[list(idx)])
         K = len(p)
+        if self.covis_deg is not None and K >= 3:
+            # A frame that shares no view direction (within covis_deg)
+            # with any CORE frame -- the chunk: the first n_core frames of
+            # a full pass, the first half of a small verification pass --
+            # has nothing the backbone can relate; a real model then
+            # emits an arbitrary pose.  Emulate that with a fresh random
+            # pose per call, so two passes never agree on it.
+            # core = the chunk: every frame of a chunk-sized pass, the
+            # first n_core of an anchored pass, the first half of a small
+            # verification pass (<= 6 frames)
+            nc = (max(1, K // 2) if K <= 6 else
+                  K if K <= self.n_core else self.n_core)
+            fw = p[:, :3, 2].copy()
+            core = fw[:nc]
+            for li in range(nc, K):
+                c = np.clip(core @ fw[li], -1, 1)
+                if np.degrees(np.arccos(c)).min() > self.covis_deg:
+                    p[li, :3, :3] = rotmat(self.rng.normal(size=3) * 2.0)
+                    p[li, :3, 3] = self.rng.normal(size=3) * 2.0
         if self.distortion > 0 and K > 1:
             # distortion grows with the GEOMETRIC distance of a frame from
             # the pass's reference frame (frame 0), reaching `distortion`
@@ -177,3 +199,32 @@ def image_descriptors(paths, max_side=160):
 
 def array_descriptors(rgbs):
     return np.stack([rgb_descriptor(r) for r in rgbs])
+
+
+def dino_descriptors(paths, device="cuda", model="dinov2_vits14", size=224):
+    """Global place descriptor from DINOv2's CLS token (384-d for ViT-S/14),
+    L2-normalised.  The pooled-RGB descriptor could not separate a revisit
+    from any other view of the same room on TUM fr1_room (true revisits
+    at cosine 0.33-0.58, look-alikes up to 0.77); a self-supervised ViT
+    embedding is the standard remedy and is backbone-agnostic.
+
+    FIRST EXECUTION ON THE GPU SERVER: needs torch + torch.hub access to
+    facebookresearch/dinov2 (weights download once).  Fails loud.
+    """
+    import torch
+    from PIL import Image
+    m = torch.hub.load("facebookresearch/dinov2", model).to(device).eval()
+    mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
+    out = []
+    with torch.no_grad():
+        for i in range(0, len(paths), 32):
+            ims = []
+            for pth in paths[i:i + 32]:
+                im = Image.open(pth).convert("RGB").resize((size, size), Image.BICUBIC)
+                ims.append(torch.from_numpy(np.asarray(im, np.float32) / 255.0)
+                           .permute(2, 0, 1))
+            x = (torch.stack(ims).to(device) - mean) / std
+            f = m(x).float().cpu().numpy()            # (B, 384) CLS features
+            out.append(f / (np.linalg.norm(f, axis=1, keepdims=True) + 1e-9))
+    return np.concatenate(out)

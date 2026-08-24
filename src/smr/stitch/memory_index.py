@@ -98,11 +98,11 @@ class ScaffoldIndex(DescriptorIndex):
 
     def __init__(self, periods=PERIODS, torus_N=32, N_h=2048, k=None,
                  seed=0, encode="template", scaffold_state=None,
-                 rls_lam=1e2):
+                 rls_lam=1e2, desc_dim=448):
         super().__init__()
         self.block = BlockScaffold(list(periods), torus_N=torus_N, N_h=N_h,
                                    k=(k or max(8, N_h // 16)), seed=seed)
-        self.mem = RLSMemory(N_h=N_h, N_s=448, lam=rls_lam)
+        self.mem = RLSMemory(N_h=N_h, N_s=int(desc_dim), lam=rls_lam)
         self.encode = encode
         self.ss = scaffold_state          # only for encode="dynamics"
         self.H = []                       # stored addresses (unit rows)

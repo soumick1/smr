@@ -1,31 +1,42 @@
 """Memory-anchored streaming stitcher -- the mechanism Pilot A measures.
 
 Chained Sim(3) has exactly one source of information about where chunk k
-belongs: chunk k-1.  Nothing ever refers back further, so per-pass gauge
-error compounds along the chain.  A pose-indexed, content-addressable
-memory supplies what chaining structurally lacks: when a frame of chunk k
-looks like a place stored long ago, memory proposes those earlier views as
-ANCHORS, the backbone is run on chunk ∪ anchors, and the chunk is placed
-against the anchors' stored global poses.  That is loop closure, and it
-is the only route to bounded drift.
+belongs: chunk k-1.  Nothing ever refers back further, so per-pass error
+compounds along the chain.  A pose-indexed, content-addressable memory
+supplies what chaining structurally lacks: when a frame of chunk k looks
+like a place stored long ago, memory proposes those earlier views as
+ANCHORS, the backbone is run on chunk ∪ anchors, and the chunk is tied to
+the anchors' stored global poses.  That is loop closure, and it is the
+only route to bounded drift.
 
 Per chunk k >= 1:
-  1. propose anchor SITES from the new frames' descriptors (index.propose);
-     a site is an old stored view plus its stored temporal neighbour, so
-     every site can be verified geometrically and contributes scale;
+  1. propose anchor SITES from the new frames' descriptors and from the
+     chain's predicted place; a site is an old stored view plus a stored
+     partner `partner_gap` keyframes away in the same chunk;
   2. one backbone pass over chunk ∪ anchor frames (cached);
-  3. verify each site: the relative pose of the pair inside the pass must
-     agree with the pair's stored relative pose (rotation / direction);
-  4. S_A = robust Sim(3) from the pass onto the stored poses of the
-     overlap frames (the chained placement);
-     S_B = the same onto the VERIFIED old-anchor frames (the loop
-     placement); when S_B exists the chunk is placed by S_B and the
-     discrepancy D = S_B o inv(S_A) is the drift the loop just exposed;
-  5. correction="distribute": D is spread over the stored frames between
-     the anchor chunk and chunk k (identity at the anchor chunk, D at
-     chunk k-1) -- the amortised, one-shot, streaming form of pose-graph
-     relaxation; "jump": earlier frames are left where they were;
-  6. bind the chunk's new frames at their global poses.
+  3. verify each site: (a) its two frames' relative pose inside the pass
+     agrees with memory; (b) the backbone placed the site INSIDE the
+     chunk's spatial extent in pass coordinates (a site with no
+     co-visibility is placed nowhere in particular);
+  4. S_A = robust Sim(3) from the pass onto the stored overlap frames (the
+     chained placement); S_B = the same onto the verified anchors, with
+     the scale taken from S_A unless the anchors' baseline is a decent
+     fraction of the chunk's spread (a 2-frame scale is noise);
+  5. CONSISTENCY GATE: the closure is accepted only if the discrepancy
+     D = S_B o inv(S_A), evaluated at the chunk, is inside a drift budget
+     that grows with the number of chunks since the last closure.  A true
+     revisit exposes the chain's drift (degrees, a fraction of a chunk
+     spread); a false one exposes a random transform (tens of degrees,
+     metres).  Measured on TUM fr1_room with VGGT: true closures had
+     D_rot <= 4.4 deg, false ones >= 21 deg.  Without this gate every
+     row was destroyed by false closures -- verifying a site against
+     itself (step 3a alone) passes for any adjacent pair anywhere;
+  6. correction="relax": a local pose-graph solve over the chunks since
+     the last closure, earlier chunks fixed -- the amortised, streaming
+     form of the batch back-end (cost O(stretch)); "distribute" spreads
+     D linearly; "jump" places chunk k by S_B and moves nothing else;
+     "none" keeps the chained placement (edges are still recorded);
+  7. bind the chunk's new frames at their global poses.
 
 With n_sites=0 no anchor is ever proposed and the pass is the bare chunk,
 so the SAME code path produces the chained baseline (tested).  Every
@@ -48,22 +59,41 @@ def _dir_err_deg(a, b):
     return float(np.degrees(np.arccos(np.clip(float(a @ b) / (na * nb), -1, 1))))
 
 
+def _spread(centres):
+    c = np.asarray(centres, float)
+    if len(c) < 2:
+        return 1.0
+    return float(np.median(np.linalg.norm(c - c.mean(0), axis=1))) + 1e-12
+
+
 class AnchoredStitcher:
     def __init__(self, index=None, n_sites=2, recent_window=None,
-                 top_proposals=5, desc_thresh=None,
-                 site_rot_deg=10.0, site_dir_deg=25.0,
+                 top_proposals=5, desc_thresh=None, partner_gap=3,
+                 site_rot_deg=10.0, site_dir_deg=25.0, extent_factor=3.0,
                  rot_thresh_deg=10.0, pos_thresh_rel=0.5,
-                 min_old_frames=2, correction="distribute", robust=True,
-                 pose_proposals=True, verbose=False):
+                 min_old_frames=2, min_baseline_rel=0.25,
+                 budget_rot=(10.0, 3.0, 45.0), budget_pos=(1.0, 0.5),
+                 budget_logscale=0.5, remeasure=False, remeasure_rot_deg=8.0,
+                 remeasure_dir_deg=20.0, remeasure_ratio=1.5,
+                 correction="relax", robust=True, pose_proposals=True,
+                 verbose=False):
         self.index = index if index is not None else DescriptorIndex()
         self.n_sites = int(n_sites)
         self.recent_window = recent_window
         self.top = int(top_proposals)
         self.desc_thresh = desc_thresh
+        self.partner_gap = int(partner_gap)
         self.site_rot_deg, self.site_dir_deg = site_rot_deg, site_dir_deg
+        self.extent_factor = extent_factor
         self.rot_thresh_deg, self.pos_thresh_rel = rot_thresh_deg, pos_thresh_rel
         self.min_old_frames = int(min_old_frames)
-        assert correction in ("distribute", "jump", "none")
+        self.min_baseline_rel = min_baseline_rel
+        self.budget_rot, self.budget_pos = budget_rot, budget_pos
+        self.budget_logscale = budget_logscale
+        self.remeasure = remeasure
+        self.remeasure_rot_deg, self.remeasure_dir_deg = remeasure_rot_deg, remeasure_dir_deg
+        self.remeasure_ratio = remeasure_ratio
+        assert correction in ("relax", "distribute", "jump", "none")
         self.correction = correction
         self.robust = robust
         self.pose_proposals = pose_proposals
@@ -80,9 +110,18 @@ class AnchoredStitcher:
             keep = np.ones(len(A), bool)
         return S, keep, info
 
+    def budget(self, n_stretch):
+        """Drift budget for a closure after n_stretch un-anchored chunks:
+        rotation (deg), position (in units of the chunk's spread), and
+        |log scale|."""
+        r0, r1, rmax = self.budget_rot
+        p0, p1 = self.budget_pos
+        return (min(rmax, r0 + r1 * n_stretch), p0 + p1 * n_stretch,
+                self.budget_logscale)
+
     def _propose_sites(self, new, descriptors, stored, owner, k, chunk_len):
-        """Old anchor sites for chunk k: (j, partner) pairs with owner < k-1
-        and outside the recent window."""
+        """Old anchor sites for chunk k: (j, partner, score, cos) with
+        owner < k-1 and outside the recent window."""
         if self.n_sites <= 0 or not stored:
             return []
         recent = self.recent_window if self.recent_window is not None \
@@ -107,9 +146,12 @@ class AnchoredStitcher:
         for j in sorted(cands, key=lambda g: -cands[g][0]):
             oc = owner[j]
             partner = None
-            for p in (j + 1, j - 1, j + 2, j - 2):
-                if p in stored and owner[p] == oc and p not in exclude:
-                    partner = p
+            for gap in range(self.partner_gap, 0, -1):
+                for p in (j + gap, j - gap):
+                    if p in stored and owner[p] == oc and p not in exclude:
+                        partner = p
+                        break
+                if partner is not None:
                     break
             if partner is None:
                 continue
@@ -121,14 +163,62 @@ class AnchoredStitcher:
                 break
         return sites
 
-    def _verify_site(self, site, P, pos_in_pass, stored):
+    def _verify_site(self, site, P, pos_in_pass, stored, chunk_pos):
+        """(a) the site's internal relative pose agrees with memory;
+        (b) the backbone placed the site inside the chunk's extent."""
         j, p = site[0], site[1]
         rel_pass = np.linalg.inv(P[pos_in_pass[j]]) @ P[pos_in_pass[p]]
         rel_st = np.linalg.inv(stored[j]) @ stored[p]
         rot = rotation_angle_deg(rel_pass[:3, :3].T @ rel_st[:3, :3])
         dr = _dir_err_deg(rel_pass[:3, 3], rel_st[:3, 3])
-        ok = rot < self.site_rot_deg and dr < self.site_dir_deg
-        return ok, rot, dr
+        cc = P[chunk_pos, :3, 3]
+        sp = _spread(cc)
+        dist = max(np.linalg.norm(P[pos_in_pass[g], :3, 3] - cc.mean(0))
+                   for g in (j, p)) / sp
+        ok = (rot < self.site_rot_deg and dr < self.site_dir_deg
+              and dist < self.extent_factor)
+        return ok, rot, dr, float(dist)
+
+    def _remeasure_site(self, site, P, pos_in_pass, idx, new, descriptors,
+                        cache, runner):
+        """Independent check of a site: re-run the backbone on a MINIMAL
+        pass -- the two chunk frames that best match the site plus the
+        site's two frames -- and require the chunk->anchor relative pose
+        to agree with the big pass (rotation, translation direction, and
+        the scale-free distance ratio |c_q - c_j| / |c_j - c_p|).
+
+        A co-visible anchor is placed the same way in any context; an
+        anchor with nothing in common with the chunk is placed arbitrarily
+        and differently in the two passes.  This is what separates a
+        revisit from a look-alike, and it does not depend on how large
+        the drift is.  Cost: one 4-frame pass per candidate site.
+        """
+        j, p = site[0], site[1]
+        if descriptors is None:
+            return True, dict(skipped=True)
+        cos = [(float(descriptors[g] @ descriptors[j]), g) for g in idx]
+        cos.sort(reverse=True)
+        q = cos[0][1]
+        q2 = next((g for _, g in cos[1:] if abs(g - q) <= 3), cos[1][1])
+        mini = [q, q2, j, p]
+        Pm = cache.get(mini, runner)["poses"]
+        mpos = {g: i for i, g in enumerate(mini)}
+
+        def rel(Pp, ip, iq, ij, ipp):
+            r = np.linalg.inv(Pp[iq]) @ Pp[ij]
+            d_qj = np.linalg.norm(Pp[ij, :3, 3] - Pp[iq, :3, 3])
+            d_jp = np.linalg.norm(Pp[ij, :3, 3] - Pp[ipp, :3, 3]) + 1e-9
+            return r, d_qj / d_jp
+
+        r_big, ratio_big = rel(P, None, pos_in_pass[q], pos_in_pass[j], pos_in_pass[p])
+        r_min, ratio_min = rel(Pm, None, mpos[q], mpos[j], mpos[p])
+        rot = rotation_angle_deg(r_big[:3, :3].T @ r_min[:3, :3])
+        dr = _dir_err_deg(r_big[:3, 3], r_min[:3, 3])
+        ratio = max(ratio_big, ratio_min) / max(min(ratio_big, ratio_min), 1e-9)
+        ok = (rot < self.remeasure_rot_deg and dr < self.remeasure_dir_deg
+              and ratio < self.remeasure_ratio)
+        return ok, dict(q=int(q), rot_deg=float(rot), dir_deg=float(dr),
+                        ratio=float(ratio))
 
     # ---------------------------------------------------------------- run
     def run(self, chunks, cache, runner, descriptors=None):
@@ -136,12 +226,22 @@ class AnchoredStitcher:
         passes, edges, events = [], [], []
         chunk_len = max(len(c) for c in chunks)
         last_closed = 0                 # most recent chunk placed by anchors
+        n_rejected = 0
 
         def bind(gi, T, k):
             stored[gi] = np.asarray(T, float)
             owner[gi] = k
             s = descriptors[gi] if descriptors is not None else np.zeros(448)
             self.index.add(gi, stored[gi], s)
+
+        def node_of(c):
+            """Current similarity chunk-c-local -> world."""
+            mine = [g for g, o in owner.items() if o == c]
+            if len(mine) < 2:
+                return sim3.identity()
+            S, _ = sim3.fit_poses(np.stack([local[g] for g in mine]),
+                                  np.stack([stored[g] for g in mine]))
+            return S
 
         for k, idx in enumerate(chunks):
             new = [i for i in idx if i not in stored]
@@ -170,17 +270,23 @@ class AnchoredStitcher:
             P = cache.get(pass_idx, runner)["poses"]
             passes.append(pass_idx)
             pos = {gi: li for li, gi in enumerate(pass_idx)}
+            chunk_pos = [pos[g] for g in idx]
             for gi in new:
                 local[gi] = P[pos[gi]]
 
             # -- verify the sites
             good_old, site_log = [], []
             for site in sites:
-                ok, rot, dr = self._verify_site(site, P, pos, stored)
+                ok, rot, dr, dist = self._verify_site(site, P, pos, stored,
+                                                      chunk_pos)
+                rem = None
+                if ok and self.remeasure:
+                    ok, rem = self._remeasure_site(site, P, pos, idx, new,
+                                                   descriptors, cache, runner)
                 site_log.append(dict(view=int(site[0]), partner=int(site[1]),
                                      owner=int(owner[site[0]]), score=site[2],
                                      cos=site[3], rot_deg=rot, dir_deg=dr,
-                                     ok=bool(ok)))
+                                     extent=dist, remeasure=rem, ok=bool(ok)))
                 if ok:
                     good_old += [site[0], site[1]]
 
@@ -189,56 +295,108 @@ class AnchoredStitcher:
             B_ov = np.stack([stored[g] for g in overlap])
             S_A, keep_ov, info_ov = self._fit(A_ov, B_ov)
             S, loop = S_A, None
+            world_chunk = sim3.apply(S_A, P[chunk_pos])
+            spread_w = _spread(world_chunk[:, :3, 3])
+            centroid_pass = P[chunk_pos, :3, 3].mean(0)
 
-            # -- loop placement from verified old anchors
+            # -- loop placement from verified old anchors, then the gate
             if len(good_old) >= self.min_old_frames:
                 A_old = P[[pos[g] for g in good_old]]
                 B_old = np.stack([stored[g] for g in good_old])
                 S_B, keep_old, info_old = self._fit(A_old, B_old)
                 inl = [g for g, kp in zip(good_old, keep_old) if kp]
-                if len(inl) >= self.min_old_frames and info_old["scale_ok"]:
+                base = (max(np.linalg.norm(stored[g][:3, 3] - stored[h][:3, 3])
+                            for g in inl for h in inl) if len(inl) >= 2 else 0.0)
+                baseline_rel = base / spread_w
+                scale_from_anchors = baseline_rel >= self.min_baseline_rel \
+                    and info_old["scale_ok"]
+                if len(inl) >= self.min_old_frames:
+                    if not scale_from_anchors:      # scale is noise: take S_A's
+                        S_B = sim3.fit_poses_fixed_scale(
+                            P[[pos[g] for g in inl]],
+                            np.stack([stored[g] for g in inl]), S_A[0])
                     D = sim3.compose(S_B, sim3.inverse(S_A))
                     a_min = min(owner[g] for g in inl)
-                    loop = dict(anchor_chunk=int(a_min), n_old=len(inl),
-                                D_rot_deg=rotation_angle_deg(D[1]),
-                                D_trans=float(np.linalg.norm(D[2])),
-                                D_logscale=float(np.log(D[0])),
-                                applied=self.correction)
-                    # Distribute D only over the UN-ANCHORED stretch: the
-                    # chunks since the last closure (or since the anchor
-                    # chunk, whichever is later).  D is measured inside one
-                    # pass, so it carries that pass's own distortion between
-                    # the overlap frames and the anchors; if chunk k-1 was
-                    # itself anchored there is no chain drift to remove and
-                    # spreading D would corrupt correct placements (seen in
-                    # simulation: closures after the first one re-measure
-                    # within-pass distortion, not drift).
                     lo = max(a_min, last_closed)
-                    loop["stretch"] = [int(lo), int(k)]
-                    if self.correction == "distribute" and k - lo >= 2:
-                        for g, c in owner.items():
-                            if lo < c < k:
-                                alpha = (c - lo) / (k - lo)
-                                C = sim3.interpolate(D, alpha)
-                                stored[g] = sim3.apply(C, stored[g][None])[0]
-                                self.index.update_pose(g, stored[g])
-                    if self.correction in ("distribute", "jump"):
-                        S = S_B
-                        last_closed = k
-                    # correction == "none": keep the chained placement, but
-                    # still record the loop edge for the batch solver
+                    n_stretch = max(1, k - lo)
+                    b_rot, b_pos, b_ls = self.budget(n_stretch)
+                    d_rot = rotation_angle_deg(D[1])
+                    pA = S_A[0] * (S_A[1] @ centroid_pass) + S_A[2]
+                    pB = S_B[0] * (S_B[1] @ centroid_pass) + S_B[2]
+                    d_pos = float(np.linalg.norm(pA - pB)) / spread_w
+                    d_ls = float(abs(np.log(S_B[0] / S_A[0])))
+                    ok = (d_rot <= b_rot and d_pos <= b_pos
+                          and (d_ls <= b_ls or not scale_from_anchors))
+                    reason = None if ok else (
+                        "rot" if d_rot > b_rot else
+                        "pos" if d_pos > b_pos else "scale")
+                    loop = dict(anchor_chunk=int(a_min), n_old=len(inl),
+                                D_rot_deg=d_rot, D_pos_rel=d_pos, D_logscale=d_ls,
+                                baseline_rel=float(baseline_rel),
+                                scale_from_anchors=bool(scale_from_anchors),
+                                n_stretch=int(n_stretch),
+                                budget=dict(rot=b_rot, pos=b_pos, logscale=b_ls),
+                                accepted=bool(ok), reason=reason,
+                                stretch=[int(lo), int(k)],
+                                applied=self.correction if ok else "rejected")
+                    if not ok:
+                        n_rejected += 1
+                        good_old = []            # a rejected closure is no edge
+                    else:
+                        loop_edge_frames = inl
+                        loop_w_scale = 1.0 if scale_from_anchors else 0.0
+
             # -- edges for the batch solver (identical measurements)
             by_owner = {}
             for g in list(overlap) + list(good_old):
                 by_owner.setdefault(owner[g], []).append(g)
+            new_edges = []
             for c, frames in by_owner.items():
                 if len(frames) < 2:
                     continue
                 Z, keep_e, info_e = self._fit(P[[pos[g] for g in frames]],
                                               np.stack([local[g] for g in frames]))
                 if info_e["scale_ok"]:
-                    edges.append(dict(c=int(c), k=int(k), Z=Z, n=int(keep_e.sum()),
-                                      kind="seq" if c == k - 1 else "loop"))
+                    kind = "seq" if c == k - 1 else "loop"
+                    new_edges.append(dict(c=int(c), k=int(k), Z=Z,
+                                          n=int(keep_e.sum()), kind=kind,
+                                          w_scale=1.0 if kind == "seq" else loop_w_scale))
+            edges += new_edges
+
+            # -- placement / correction
+            if loop and loop["accepted"]:
+                lo, a_min = loop["stretch"][0], loop["anchor_chunk"]
+                if self.correction == "relax":
+                    from .posegraph import solve_nodes
+                    nodes = {c: node_of(c) for c in range(k)}
+                    nodes[k] = S_A
+                    free = [c for c in range(lo + 1, k + 1)]
+                    sub = [e for e in edges if e["k"] <= k and
+                           (e["c"] in free or e["k"] in free)]
+                    sol = solve_nodes(nodes, sub, free)
+                    for c in free:
+                        if c == k:
+                            continue
+                        for g, o in owner.items():
+                            if o == c:
+                                stored[g] = sim3.apply(sol[c], local[g][None])[0]
+                                self.index.update_pose(g, stored[g])
+                    S = sol[k]
+                    last_closed = k
+                elif self.correction == "distribute":
+                    D = sim3.compose(S_B, sim3.inverse(S_A))
+                    if k - lo >= 2:
+                        for g, c in owner.items():
+                            if lo < c < k:
+                                C = sim3.interpolate(D, (c - lo) / (k - lo))
+                                stored[g] = sim3.apply(C, stored[g][None])[0]
+                                self.index.update_pose(g, stored[g])
+                    S = S_B
+                    last_closed = k
+                elif self.correction == "jump":
+                    S = S_B
+                    last_closed = k
+                # "none": chained placement, edge recorded
 
             moved = sim3.apply(S, P)
             for gi in new:
@@ -248,17 +406,28 @@ class AnchoredStitcher:
                       loop=loop)
             events.append(ev)
             if self.verbose:
-                tag = f"loop->chunk {loop['anchor_chunk']} D_rot {loop['D_rot_deg']:.2f} deg" \
-                    if loop else "chain"
+                if loop and loop["accepted"]:
+                    tag = (f"LOOP->chunk {loop['anchor_chunk']} D_rot "
+                           f"{loop['D_rot_deg']:.2f} deg D_pos {loop['D_pos_rel']:.2f} "
+                           f"spread ({self.correction})")
+                elif loop:
+                    tag = (f"closure REJECTED ({loop['reason']}): D_rot "
+                           f"{loop['D_rot_deg']:.1f} deg D_pos {loop['D_pos_rel']:.2f} "
+                           f"D_logs {loop['D_logscale']:.2f} vs budget "
+                           f"{loop['budget']['rot']:.0f}/{loop['budget']['pos']:.2f}/"
+                           f"{loop['budget']['logscale']:.2f}")
+                else:
+                    tag = "chain"
                 print(f"    chunk {k:>3}: pass {len(pass_idx)} frames, "
-                      f"{len(sites)} sites, {tag}")
+                      f"{len(sites)} sites ({sum(s['ok'] for s in site_log)} verified), {tag}")
 
         order = sorted(stored)
         est = np.stack([stored[i] for i in order])
         return dict(est=est, passes=passes, edges=edges, events=events,
                     owner=[int(owner[i]) for i in order],
                     local={int(g): local[g] for g in order},
-                    n_loops=sum(1 for e in events if e.get("loop")))
+                    n_loops=sum(1 for e in events if e.get("loop") and e["loop"]["accepted"]),
+                    n_rejected=n_rejected)
 
 
 def stitch_chained(chunks, cache, runner, robust=True):

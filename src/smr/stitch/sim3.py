@@ -147,3 +147,21 @@ def fit_poses_robust(A, B, rot_thresh_deg=10.0, pos_thresh_rel=0.5,
         keep[worst_global] = False
     S, info = fit_poses(A[keep], B[keep])
     return S, keep, info
+
+
+def fit_poses_fixed_scale(A, B, s):
+    """fit_poses with the scale pinned to `s`: rotation from the frame
+    orientations, translation from the centroids.  Used when the anchors'
+    baseline is too short to measure scale (a 2-frame baseline of a few
+    centimetres gave 10-30% scale jumps on 7-Scenes chess)."""
+    A = np.asarray(A, float)
+    B = np.asarray(B, float)
+    M = np.zeros((3, 3))
+    for i in range(len(A)):
+        M += B[i, :3, :3] @ A[i, :3, :3].T
+    U, _, Vt = np.linalg.svd(M)
+    D = np.eye(3)
+    D[2, 2] = np.sign(np.linalg.det(U @ Vt))
+    R = U @ D @ Vt
+    ma, mb = A[:, :3, 3].mean(0), B[:, :3, 3].mean(0)
+    return float(s), R, mb - s * (R @ ma)

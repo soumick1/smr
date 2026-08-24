@@ -46,9 +46,9 @@ def test_sevenscenes_loader_orders_frames_and_drops_invalid(tmp_path):
     np.savetxt(d / "frame-000004.pose.txt", np.full((4, 4), -np.inf), fmt="%e")
     _png(d / "frame-000004.color.png")
     poses, paths, ids, dropped = igp.load_sevenscenes(tmp_path, "chess", 1)
-    assert ids.tolist() == [0, 1, 2, 3] and len(dropped) == 1
+    assert (ids - 100000).tolist() == [0, 1, 2, 3] and len(dropped) == 1
     assert dropped[0][1] == "invalid pose"
-    for i, fid in enumerate(ids):
+    for i, fid in enumerate(ids - 100000):
         assert np.allclose(poses[i], truth[fid])
         assert paths[i].endswith(f"frame-{fid:06d}.color.png")
 
@@ -96,3 +96,18 @@ def test_pose_variants_cover_inverse_and_flips():
     assert np.allclose(v["c2w_xy"][:3, :3], P[:3, :3] @ np.diag([-1, -1, 1]))
     for name, V in v.items():
         assert abs(np.linalg.det(V[:3, :3]) - 1) < 1e-9, name
+
+
+def test_sevenscenes_concatenates_sessions_with_unique_ids(tmp_path):
+    for s in (1, 2):
+        d = tmp_path / "chess" / f"seq-{s:02d}"
+        d.mkdir(parents=True)
+        for fid in range(3):
+            P = np.eye(4)
+            P[:3, 3] = [s, fid, 0]
+            np.savetxt(d / f"frame-{fid:06d}.pose.txt", P, fmt="%.8e", delimiter="\t")
+            _png(d / f"frame-{fid:06d}.color.png")
+    poses, paths, ids, dropped = igp.load_sevenscenes(tmp_path, "chess", [1, 2])
+    assert len(poses) == 6 and len(set(ids.tolist())) == 6
+    assert np.allclose(poses[:, 0, 3], [1, 1, 1, 2, 2, 2])
+    assert paths[3].endswith("seq-02/frame-000000.color.png")

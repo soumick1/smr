@@ -51,9 +51,10 @@ class LoopWorld:
         self.rgb = np.stack(rgbs)
         self.descriptors = array_descriptors(self.rgb)
 
-    def runner(self, noise=0.02, distortion=0.0, seed=0):
+    def runner(self, noise=0.02, distortion=0.0, seed=0, covis_deg=None,
+               n_core=16):
         return SimulatedRunner(self.gt, noise=noise, distortion=distortion,
-                               seed=seed)
+                               seed=seed, covis_deg=covis_deg, n_core=n_core)
 
     def revisit_pairs(self):
         """(i, i + n_per_lap): the same ring position one lap later."""
