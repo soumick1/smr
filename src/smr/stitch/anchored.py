@@ -71,12 +71,14 @@ class AnchoredStitcher:
                  top_proposals=5, desc_thresh=None, partner_gap=3,
                  site_rot_deg=10.0, site_dir_deg=25.0, extent_factor=3.0,
                  rot_thresh_deg=10.0, pos_thresh_rel=0.5,
-                 min_old_frames=2, min_baseline_rel=0.25,
+                 min_old_frames=2, min_baseline_rel=1.0,
                  budget_rot=(10.0, 3.0, 45.0), budget_pos=(1.0, 0.5),
-                 budget_logscale=0.5, remeasure=False, remeasure_rot_deg=8.0,
+                 budget_logscale=0.5, tight_rot=(3.0, 1.0, 15.0),
+                 tight_pos=(0.5, 0.15), require_appearance=True,
+                 remeasure=False, remeasure_rot_deg=8.0,
                  remeasure_dir_deg=20.0, remeasure_ratio=1.5,
                  correction="relax", robust=True, pose_proposals=True,
-                 verbose=False):
+                 smooth_junctions=True, verbose=False):
         self.index = index if index is not None else DescriptorIndex()
         self.n_sites = int(n_sites)
         self.recent_window = recent_window
@@ -90,6 +92,8 @@ class AnchoredStitcher:
         self.min_baseline_rel = min_baseline_rel
         self.budget_rot, self.budget_pos = budget_rot, budget_pos
         self.budget_logscale = budget_logscale
+        self.tight_rot, self.tight_pos = tight_rot, tight_pos
+        self.require_appearance = require_appearance
         self.remeasure = remeasure
         self.remeasure_rot_deg, self.remeasure_dir_deg = remeasure_rot_deg, remeasure_dir_deg
         self.remeasure_ratio = remeasure_ratio
@@ -97,6 +101,7 @@ class AnchoredStitcher:
         self.correction = correction
         self.robust = robust
         self.pose_proposals = pose_proposals
+        self.smooth_junctions = smooth_junctions
         self.verbose = verbose
 
     # ------------------------------------------------------------- helpers
@@ -110,12 +115,24 @@ class AnchoredStitcher:
             keep = np.ones(len(A), bool)
         return S, keep, info
 
-    def budget(self, n_stretch):
+    def budget(self, n_stretch, n_sites=2):
         """Drift budget for a closure after n_stretch un-anchored chunks:
         rotation (deg), position (in units of the chunk's spread), and
-        |log scale|."""
-        r0, r1, rmax = self.budget_rot
-        p0, p1 = self.budget_pos
+        |log scale|.
+
+        CONSENSUS RULE: a closure supported by ONE site may only nudge
+        (the tight budget); a large correction needs two independent
+        sites that agree (the loose budget).  On TUM fr1_room a single
+        pose-proposed site passed the loose budget with an 11.9 deg
+        "drift" after 5 chunks -- twice the whole sequence's chained loop
+        error -- and moved five chunks the wrong way.
+        """
+        if n_sites >= 2:
+            r0, r1, rmax = self.budget_rot
+            p0, p1 = self.budget_pos
+        else:
+            r0, r1, rmax = self.tight_rot
+            p0, p1 = self.tight_pos
         return (min(rmax, r0 + r1 * n_stretch), p0 + p1 * n_stretch,
                 self.budget_logscale)
 
@@ -275,7 +292,7 @@ class AnchoredStitcher:
                 local[gi] = P[pos[gi]]
 
             # -- verify the sites
-            good_old, site_log = [], []
+            good_old, site_log, n_ok_sites, n_app_sites = [], [], 0, 0
             for site in sites:
                 ok, rot, dr, dist = self._verify_site(site, P, pos, stored,
                                                       chunk_pos)
@@ -289,6 +306,10 @@ class AnchoredStitcher:
                                      extent=dist, remeasure=rem, ok=bool(ok)))
                 if ok:
                     good_old += [site[0], site[1]]
+                    n_ok_sites += 1
+                    n_app_sites += int(site[3] > 0.0)
+            if self.require_appearance and n_app_sites == 0:
+                good_old = []            # pose-only sites cannot close a loop
 
             # -- chained placement from the overlap
             A_ov = P[[pos[g] for g in overlap]]
@@ -319,7 +340,7 @@ class AnchoredStitcher:
                     a_min = min(owner[g] for g in inl)
                     lo = max(a_min, last_closed)
                     n_stretch = max(1, k - lo)
-                    b_rot, b_pos, b_ls = self.budget(n_stretch)
+                    b_rot, b_pos, b_ls = self.budget(n_stretch, n_ok_sites)
                     d_rot = rotation_angle_deg(D[1])
                     pA = S_A[0] * (S_A[1] @ centroid_pass) + S_A[2]
                     pB = S_B[0] * (S_B[1] @ centroid_pass) + S_B[2]
@@ -331,6 +352,7 @@ class AnchoredStitcher:
                         "rot" if d_rot > b_rot else
                         "pos" if d_pos > b_pos else "scale")
                     loop = dict(anchor_chunk=int(a_min), n_old=len(inl),
+                                n_sites=int(n_ok_sites), n_app_sites=int(n_app_sites),
                                 D_rot_deg=d_rot, D_pos_rel=d_pos, D_logscale=d_ls,
                                 baseline_rel=float(baseline_rel),
                                 scale_from_anchors=bool(scale_from_anchors),
@@ -344,7 +366,10 @@ class AnchoredStitcher:
                         good_old = []            # a rejected closure is no edge
                     else:
                         loop_edge_frames = inl
-                        loop_w_scale = 1.0 if scale_from_anchors else 0.0
+                        # a two-frame scale is only as good as its baseline:
+                        # full weight from two chunk spreads upward
+                        loop_w_scale = (min(1.0, 0.5 * float(baseline_rel))
+                                        if scale_from_anchors else 0.0)
 
             # -- edges for the batch solver (identical measurements)
             by_owner = {}
@@ -401,6 +426,21 @@ class AnchoredStitcher:
             moved = sim3.apply(S, P)
             for gi in new:
                 bind(gi, moved[pos[gi]], k)
+            if self.smooth_junctions and loop and loop["accepted"]:
+                # Relaxing whole chunks leaves a step at the junction: the
+                # overlap frames sit where chunk k-1 put them while chunk
+                # k's new frames sit where the closure put them (measured
+                # on TUM fr1_room: AUC_in 80.8 -> 75.8).  Blend each overlap
+                # frame between its owner's placement and chunk k's, first
+                # frame staying with the owner, last frame almost with k.
+                n_ov = len(overlap)
+                for r_i, g in enumerate(overlap):
+                    w = (r_i + 1) / (n_ov + 1)
+                    rel = np.linalg.inv(stored[g]) @ moved[pos[g]]
+                    C = sim3.interpolate((1.0, rel[:3, :3], rel[:3, 3]), w)
+                    T = stored[g] @ np.block([[C[1], C[2][:, None]], [np.zeros((1, 3)), 1.0]])
+                    stored[g] = T
+                    self.index.update_pose(g, T)
             ev = dict(chunk=k, n_new=len(new), n_overlap=len(overlap),
                       n_overlap_inliers=int(keep_ov.sum()), sites=site_log,
                       loop=loop)

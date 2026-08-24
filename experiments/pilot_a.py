@@ -161,9 +161,11 @@ def main():
     ap.add_argument("--remeasure", action="store_true",
                     help="verify each site with a 4-frame second pass "
                          "(ablation; off by default, see notes)")
-    ap.add_argument("--descriptor", default="rgb", choices=["rgb", "dino"],
-                    help="place descriptor: pooled RGB (no model) or "
-                         "DINOv2 ViT-S/14 CLS (first run downloads weights)")
+    ap.add_argument("--descriptor", default=None, choices=["rgb", "dino"],
+                    help="place descriptor: DINOv2 ViT-S/14 CLS (default for "
+                         "real backbones; pooled RGB found 1 closure in 34 "
+                         "chunks where DINO found 10) or pooled RGB (no "
+                         "model; default for the synthetic world)")
     ap.add_argument("--probe-only", action="store_true")
     ap.add_argument("--ceiling", action="store_true",
                     help="also measure the largest single pass that fits")
@@ -198,6 +200,8 @@ def main():
     simulated = a.simulate_chunks or a.backbone == "synthetic"
     if a.keyframe_stride is None:
         a.keyframe_stride = 1 if a.backbone == "synthetic" else 10
+    if a.descriptor is None:
+        a.descriptor = "rgb" if simulated else "dino"
     paths, gt_full, desc_fn, runner, meta = load_inputs(a)
     key = keyframe_indices(len(gt_full), a.keyframe_stride, a.max_frames)
     gt = gt_full[key]
