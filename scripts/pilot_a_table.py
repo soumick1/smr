@@ -18,7 +18,11 @@ COLS = [("ate_rmse", "ATE", "{:.3f}"), ("rpe_trans", "RPE-t1", "{:.3f}"),
 def load(paths):
     reps = []
     for p in paths:
-        r = json.load(open(p))
+        try:
+            r = json.load(open(p))
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"skipping unreadable report {p}: {e}", file=sys.stderr)
+            continue
         if r.get("SIMULATED"):
             print(f"skipping SIMULATED report {p}", file=sys.stderr)
             continue

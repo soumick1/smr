@@ -99,23 +99,28 @@ class MASt3RBackbone(PointmapBackbone):
         images = load_images(paths, size=self.image_size)
         pairs = make_pairs(images, scene_graph=self.scene_graph,
                            prefilter=None, symmetrize=True)
-        cache = self.cache_dir or tempfile.mkdtemp(prefix="mast3r_cache_")
-        scene = sparse_global_alignment(paths, pairs, cache, self._model,
-                                        subsample=self.subsample,
-                                        kinematic_mode=self.kinematic_mode,
-                                        device=self.device)
-
         def np_(x):
             return np.asarray(x.detach().cpu().numpy() if hasattr(x, "detach")
                               else x, dtype=float)
 
-        rgb = np.stack([np.asarray(im, dtype=float) for im in scene.imgs])
-        K_, H, W = rgb.shape[:3]
-        poses = np.stack([np_(p) for p in scene.get_im_poses()])
-        intr = np.stack([np_(k) for k in scene.intrinsics])
-        _pts, depths, confs = scene.get_dense_pts3d(subsample=self.subsample)
-        depth = np.stack([np_(d).reshape(H, W) for d in depths])
-        conf = np.stack([np_(c).reshape(H, W) for c in confs])
+        # sparse_global_alignment writes per-image features and per-pair
+        # correspondences into `cache` (hundreds of MB for a 20-image pass).
+        # v70: a fresh mkdtemp per call was never removed and filled the
+        # disk during the nine-backbone sweep; the cache now lives only for
+        # the duration of the call unless the user pins cache_dir.
+        with tempfile.TemporaryDirectory(prefix="mast3r_cache_") as tmp:
+            cache = self.cache_dir or tmp
+            scene = sparse_global_alignment(paths, pairs, cache, self._model,
+                                            subsample=self.subsample,
+                                            kinematic_mode=self.kinematic_mode,
+                                            device=self.device)
+            rgb = np.stack([np.asarray(im, dtype=float) for im in scene.imgs])
+            K_, H, W = rgb.shape[:3]
+            poses = np.stack([np_(p) for p in scene.get_im_poses()])
+            intr = np.stack([np_(k) for k in scene.intrinsics])
+            _pts, depths, confs = scene.get_dense_pts3d(subsample=self.subsample)
+            depth = np.stack([np_(d).reshape(H, W) for d in depths])
+            conf = np.stack([np_(c).reshape(H, W) for c in confs])
         return RawViews(poses=poses, rgb=rgb, conf=conf, depth=depth,
                         intrinsics=intr, extras=dict(aligner="sparse_ga"))
 

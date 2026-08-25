@@ -140,7 +140,13 @@ class PassCache:
         self.data = {}
         self.n_runs = 0
         if self.path is not None and self.path.exists():
-            self.data = np.load(self.path, allow_pickle=True).item()
+            try:
+                self.data = np.load(self.path, allow_pickle=True).item()
+            except Exception as e:                       # truncated by a full disk
+                bad = self.path.with_suffix(".corrupt.npy")
+                self.path.rename(bad)
+                print(f"  pass cache {self.path} unreadable ({e}); moved to {bad}, "
+                      f"starting a fresh cache")
 
     def key(self, idx):
         return tuple(int(i) for i in idx)
@@ -159,9 +165,13 @@ class PassCache:
         return self.data[k]
 
     def save(self):
+        """Atomic: write to a sibling file, then rename, so a full disk or a
+        killed process can never leave a half-written cache behind."""
         if self.path is not None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            np.save(self.path, self.data, allow_pickle=True)
+            tmp = self.path.with_suffix(".tmp.npy")
+            np.save(tmp, self.data, allow_pickle=True)
+            tmp.replace(self.path)
 
     def totals(self, keys=None):
         """Wall time and peak memory over the given passes (all if None)."""

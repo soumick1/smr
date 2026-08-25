@@ -20,6 +20,11 @@ for gt in data/gt/*.npz; do
   for bb in $BACKBONES; do
     tag=outputs/reports/pilotA_${scene}_${bb}_s${stride}
     if [ -f "$tag.json" ]; then echo "skip $tag (exists)"; continue; fi
+    free_gb=$(df -BG --output=avail "$PWD" | tail -1 | tr -d ' G')
+    tmp_gb=$(df -BG --output=avail /tmp | tail -1 | tr -d ' G')
+    if [ "$free_gb" -lt 5 ] || [ "$tmp_gb" -lt 5 ]; then
+      echo "!!! under 5 GB free (repo: ${free_gb}G, /tmp: ${tmp_gb}G) -- stopping before $scene/$bb"; exit 2
+    fi
     echo "=== $scene / $bb (stride $stride) ==="
     python experiments/pilot_a.py --gt "$gt" --backbone "$bb" \
         --keyframe-stride $stride --chunk 16 --overlap 8 --sites 2 \
