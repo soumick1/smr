@@ -158,6 +158,12 @@ def main():
     ap.add_argument("--correction", default="relax",
                     choices=["relax", "distribute", "jump", "none"],
                     help="how an accepted closure is applied in the smr row")
+    ap.add_argument("--desc-thresh", type=float, default=None,
+                    help="descriptor cosine gate for proposals. Default: 0.5 "
+                         "absolute for DINO (the adaptive 5th-percentile-of-"
+                         "adjacent rule lands near 0.85 at stride 5 and "
+                         "proposed nothing -- 0 loops on chess seq-01); "
+                         "adaptive for the rgb descriptor")
     ap.add_argument("--remeasure", action="store_true",
                     help="verify each site with a 4-frame second pass "
                          "(ablation; off by default, see notes)")
@@ -202,12 +208,21 @@ def main():
         a.keyframe_stride = 1 if a.backbone == "synthetic" else 10
     if a.descriptor is None:
         a.descriptor = "rgb" if simulated else "dino"
+    if a.desc_thresh is None and a.descriptor == "dino":
+        a.desc_thresh = 0.5
     paths, gt_full, desc_fn, runner, meta = load_inputs(a)
     key = keyframe_indices(len(gt_full), a.keyframe_stride, a.max_frames)
     gt = gt_full[key]
     chunks = make_chunks(len(key), a.chunk, a.overlap)
     if paths is not None:
         kpaths = [paths[i] for i in key]
+        # pre-flight: every keyframe image must exist BEFORE any model is
+        # loaded (a missing session folder cost a silent nine-backbone loop)
+        missing = [q for q in kpaths if not pathlib.Path(q).exists()]
+        if missing:
+            raise SystemExit(f"{len(missing)} of {len(kpaths)} keyframe images are "
+                             f"missing, first: {missing[0]}  -- re-extract the "
+                             f"sequence or regenerate the gt npz")
         if runner is None:
             runner = BackboneRunner(a.backbone, kpaths, device=a.device)
     if simulated:
@@ -288,7 +303,8 @@ def main():
         add_row("chained", est, [list(c) for c in chunks],
                 dict(n_loops=0, n_edges=len(chunks) - 1, n_rejected=0))
     dim = descriptors.shape[1]
-    common = dict(n_sites=a.sites, remeasure=a.remeasure, verbose=a.verbose)
+    common = dict(n_sites=a.sites, remeasure=a.remeasure, verbose=a.verbose,
+                  desc_thresh=a.desc_thresh)
 
     def scaffold():
         return ScaffoldIndex(N_h=a.N_h, torus_N=a.torus_N, seed=a.seed,
