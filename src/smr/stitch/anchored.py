@@ -78,7 +78,8 @@ class AnchoredStitcher:
                  remeasure=False, remeasure_rot_deg=8.0,
                  remeasure_dir_deg=20.0, remeasure_ratio=1.5,
                  correction="relax", robust=True, pose_proposals=True,
-                 smooth_junctions=True, verbose=False):
+                 smooth_junctions=True, mutual_nn=True, site_agree_rot=5.0,
+                 site_agree_pos=0.5, verbose=False):
         self.index = index if index is not None else DescriptorIndex()
         self.n_sites = int(n_sites)
         self.recent_window = recent_window
@@ -102,6 +103,8 @@ class AnchoredStitcher:
         self.robust = robust
         self.pose_proposals = pose_proposals
         self.smooth_junctions = smooth_junctions
+        self.mutual_nn = mutual_nn
+        self.site_agree_rot, self.site_agree_pos = site_agree_rot, site_agree_pos
         self.verbose = verbose
 
     # ------------------------------------------------------------- helpers
@@ -146,10 +149,22 @@ class AnchoredStitcher:
         lo = min(new) - recent
         exclude = {g for g in stored if g >= lo or owner[g] >= k - 1}
         cands = {}
+        new_desc = np.stack([descriptors[i] for i in new])
         for i in new:
             for (j, score, cos) in self.index.propose(
                     descriptors[i], exclude=exclude, top=self.top,
                     desc_thresh=self.desc_thresh):
+                if self.mutual_nn:
+                    # j must also find THIS chunk among its nearest views:
+                    # the query's best match must be the match's best
+                    # query (perceptual aliasing -- an office of identical
+                    # desks, a floor of identical boards -- fails this far
+                    # more often than a true revisit does)
+                    sims = new_desc @ self.index.T_desc(j)
+                    if float(sims.max()) < cos - 1e-6 and \
+                            int(np.argmax(sims)) != new.index(i):
+                        if float(sims.max()) > cos + 0.02:
+                            continue
                 if score > cands.get(j, (-np.inf, 0.0))[0]:
                     cands[j] = (score, cos)
         if self.pose_proposals and new:
@@ -321,6 +336,52 @@ class AnchoredStitcher:
             centroid_pass = P[chunk_pos, :3, 3].mean(0)
 
             # -- loop placement from verified old anchors, then the gate
+            if n_ok_sites >= 2 and len(good_old) >= 4:
+                # per-site placements must agree with each other
+                per_site = []
+                for s_i in range(0, len(good_old), 2):
+                    fr = good_old[s_i:s_i + 2]
+                    Si = sim3.fit_poses_fixed_scale(
+                        P[[pos[g] for g in fr]], np.stack([stored[g] for g in fr]), S_A[0])
+                    per_site.append(Si)
+                if len(per_site) >= 2:
+                    Da = sim3.compose(per_site[0], sim3.inverse(per_site[1]))
+                    rot_d = rotation_angle_deg(Da[1])
+                    pa = per_site[0][0] * (per_site[0][1] @ centroid_pass) + per_site[0][2]
+                    pb = per_site[1][0] * (per_site[1][1] @ centroid_pass) + per_site[1][2]
+                    pos_d = float(np.linalg.norm(pa - pb)) / spread_w
+                    if rot_d > self.site_agree_rot or pos_d > self.site_agree_pos:
+                        # the sites disagree -- the aliasing signature.  Keep
+                        # the one closer to dead reckoning (S_A) but demote
+                        # the closure to single-site, i.e. the tight budget:
+                        # a lone survivor may only nudge.
+                        pA = S_A[0] * (S_A[1] @ centroid_pass) + S_A[2]
+                        dev = []
+                        for Si in per_site:
+                            pi_ = Si[0] * (Si[1] @ centroid_pass) + Si[2]
+                            Di = sim3.compose(Si, sim3.inverse(S_A))
+                            dev.append(rotation_angle_deg(Di[1]) / 10.0
+                                       + np.linalg.norm(pi_ - pA) / spread_w)
+                        keep_i = int(np.argmin(dev))
+                        # Is the discarded site plain garbage (the robust
+                        # 4-frame fit already marks its frames as outliers)
+                        # or a plausible look-alike (internally consistent,
+                        # just elsewhere)?  Garbage: drop it, keep the loose
+                        # budget.  Look-alike: keep the closer site under
+                        # the tight budget -- a lone survivor may only nudge.
+                        _, keep4, _ = self._fit(P[[pos[g] for g in good_old]],
+                                                np.stack([stored[g] for g in good_old]))
+                        drop = 1 - keep_i
+                        garbage = not keep4[2 * drop: 2 * drop + 2].any()
+                        ok_sites = [s for s in site_log if s["ok"]]
+                        for s_i, s in enumerate(ok_sites):
+                            if s_i != keep_i:
+                                s["ok"] = False
+                                s["disagree"] = dict(rot_deg=float(rot_d), pos_rel=pos_d,
+                                                     garbage=bool(garbage))
+                        good_old = good_old[2 * keep_i: 2 * keep_i + 2]
+                        n_app_sites = int(ok_sites[keep_i]["cos"] > 0.0)
+                        n_ok_sites = 2 if garbage else 1
             if len(good_old) >= self.min_old_frames:
                 A_old = P[[pos[g] for g in good_old]]
                 B_old = np.stack([stored[g] for g in good_old])

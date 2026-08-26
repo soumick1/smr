@@ -92,6 +92,10 @@ class DescriptorIndex:
     def pose(self, gi):
         return self.T[int(gi)]
 
+    def T_desc(self, gi):
+        """Stored descriptor of a view (for mutual-nearest-neighbour checks)."""
+        return self.S[self.ids.index(int(gi))]
+
 
 class ScaffoldIndex(DescriptorIndex):
     name = "scaffold"

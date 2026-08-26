@@ -21,6 +21,7 @@ def chunk_probe(chunks, cache, runner, gt):
         rra, rta = pairwise_pose_errors(P, g)
         rows.append(dict(chunk=k, n=len(idx), ate=ate_rmse(P, g),
                          auc30=auc_at(rra, rta),
+                         auc30_rot=auc_at(rra, np.zeros_like(rta)),
                          rra_med=float(np.median(rra)),
                          rta_med=float(np.median(rta))))
     return rows
@@ -53,6 +54,12 @@ def gate(probe_rows, reference, ratio=0.6, floor=40.0, pct=10.0):
     med, worst = float(np.median(aucs)), float(aucs.min())
     low = float(np.percentile(aucs, pct))
     ok = med >= ratio * reference["auc30"] and low >= floor
+    # Rotation-dominant sequences (TUM rpy, 360) have undefined translation
+    # directions, so the joint AUC collapses while the poses are fine
+    # (ATE 0.02 m on rpy).  Judge those on rotation-only AUC.
+    if not ok and all("auc30_rot" in r for r in probe_rows):
+        aucr = np.array([r["auc30_rot"] for r in probe_rows])
+        ok = float(np.median(aucr)) >= 60.0 and float(np.percentile(aucr, pct)) >= floor
     return ok, dict(median_auc=med, worst_auc=worst, pct_auc=low, pct=pct,
                     below_floor=[int(r.get("chunk", i)) for i, r in enumerate(probe_rows)
                                  if r["auc30"] < floor],

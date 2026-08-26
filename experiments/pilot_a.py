@@ -164,6 +164,11 @@ def main():
                          "adjacent rule lands near 0.85 at stride 5 and "
                          "proposed nothing -- 0 loops on chess seq-01); "
                          "adaptive for the rgb descriptor")
+    ap.add_argument("--no-mutual-nn", action="store_true",
+                    help="ablation: drop the mutual-nearest-neighbour test on proposals")
+    ap.add_argument("--site-agree", default="5,0.5",
+                    help="max rot(deg),pos(spreads) disagreement between two "
+                         "sites before the closure is demoted to single-site")
     ap.add_argument("--remeasure", action="store_true",
                     help="verify each site with a 4-frame second pass "
                          "(ablation; off by default, see notes)")
@@ -303,8 +308,10 @@ def main():
         add_row("chained", est, [list(c) for c in chunks],
                 dict(n_loops=0, n_edges=len(chunks) - 1, n_rejected=0))
     dim = descriptors.shape[1]
+    sa = [float(x) for x in a.site_agree.split(",")]
     common = dict(n_sites=a.sites, remeasure=a.remeasure, verbose=a.verbose,
-                  desc_thresh=a.desc_thresh)
+                  desc_thresh=a.desc_thresh, mutual_nn=not a.no_mutual_nn,
+                  site_agree_rot=sa[0], site_agree_pos=sa[1])
 
     def scaffold():
         return ScaffoldIndex(N_h=a.N_h, torus_N=a.torus_N, seed=a.seed,
