@@ -560,7 +560,7 @@ class AnchoredStitcher:
 def stitch_chained(chunks, cache, runner, robust=True):
     """Plain sequential Sim(3) chaining, written independently of the
     stitcher above so the n_sites=0 reduction can be tested against it."""
-    glob = {}
+    glob, prev_scale = {}, 1.0
     for k, idx in enumerate(chunks):
         P = cache.get(idx, runner)["poses"]
         if k == 0:
@@ -568,12 +568,22 @@ def stitch_chained(chunks, cache, runner, robust=True):
                 glob[gi] = P[li]
             continue
         ov = [(li, gi) for li, gi in enumerate(idx) if gi in glob]
-        A = P[[li for li, _ in ov]]
-        B = np.stack([glob[gi] for _, gi in ov])
-        if robust and len(A) >= 3:
-            S, _, _ = sim3.fit_poses_robust(A, B, min_inliers=3)
+        if len(ov) < 2:
+            # session start: a chain has nothing to align to.  It continues
+            # from its last pose with its previous scale -- the honest
+            # definition of the baseline on multi-session data (the memory-
+            # anchored stitcher relocalises here instead).
+            last = max(glob)
+            R = glob[last][:3, :3] @ P[0, :3, :3].T
+            S = (prev_scale, R, glob[last][:3, 3] - prev_scale * (R @ P[0, :3, 3]))
         else:
-            S, _ = sim3.fit_poses(A, B)
+            A = P[[li for li, _ in ov]]
+            B = np.stack([glob[gi] for _, gi in ov])
+            if robust and len(A) >= 3:
+                S, _, _ = sim3.fit_poses_robust(A, B, min_inliers=3)
+            else:
+                S, _ = sim3.fit_poses(A, B)
+        prev_scale = float(S[0])
         moved = sim3.apply(S, P)
         for li, gi in enumerate(idx):
             glob.setdefault(gi, moved[li])

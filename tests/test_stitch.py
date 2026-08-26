@@ -376,3 +376,17 @@ def test_robust_batch_drops_an_injected_bad_loop_edge(world, chunks):
     pg_rob, info_r = posegraph.solve(r2, chunks, robust_reject=True)
     assert info_r["n_dropped"] >= 1
     assert ate_rmse(pg_rob, world.gt) < ate_rmse(pg_naive, world.gt)
+
+
+def test_chained_baseline_survives_a_session_start(world):
+    """The chain must continue (not crash) when a chunk shares no frame
+    with memory; the anchored stitcher relocalises there and must beat it."""
+    from smr.stitch.chunks import make_session_chunks
+    n = len(world.gt); half = n // 2
+    ch = make_session_chunks([0] * half + [1] * (n - half), 16, 8)
+    cache = PassCache()
+    runner = world.runner(noise=0.01, distortion=0.05, seed=2)
+    est_ch = stitch_chained(ch, cache, runner)
+    assert est_ch.shape == (n, 4, 4) and np.isfinite(est_ch).all()
+    r = AnchoredStitcher(ScaffoldIndex(seed=0), n_sites=2).run(ch, cache, runner, world.descriptors)
+    assert ate_rmse(r["est"], world.gt) < ate_rmse(est_ch, world.gt)
