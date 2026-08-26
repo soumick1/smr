@@ -62,3 +62,24 @@ def regauge(poses):
     if scale > 1e-9:
         poses[:, :3, 3] /= scale
     return poses
+
+
+def make_session_chunks(sessions, size, overlap):
+    """Chunks that never straddle a session boundary.
+
+    `sessions` is the session id of each keyframe (in order).  A chunk that
+    mixes the end of one session with the start of the next contains two
+    disjoint places, its pass geometry is garbage, and the chain breaks
+    there (7-Scenes office x6: chained ATE 0.55 m for VGGT-Omega with every
+    chunk individually fine).  Each session is chunked on its own; the
+    first chunk of a session shares no frame with memory and must be
+    placed by relocalisation (AnchoredStitcher handles that case).
+    """
+    sessions = list(sessions)
+    chunks, start = [], 0
+    for i in range(1, len(sessions) + 1):
+        if i == len(sessions) or sessions[i] != sessions[start]:
+            for c in make_chunks(i - start, size, overlap):
+                chunks.append([start + j for j in c])
+            start = i
+    return chunks

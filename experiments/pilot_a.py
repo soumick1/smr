@@ -164,11 +164,13 @@ def main():
                          "adjacent rule lands near 0.85 at stride 5 and "
                          "proposed nothing -- 0 loops on chess seq-01); "
                          "adaptive for the rgb descriptor")
-    ap.add_argument("--no-mutual-nn", action="store_true",
-                    help="ablation: drop the mutual-nearest-neighbour test on proposals")
-    ap.add_argument("--site-agree", default="5,0.5",
-                    help="max rot(deg),pos(spreads) disagreement between two "
-                         "sites before the closure is demoted to single-site")
+    ap.add_argument("--mutual-nn", action="store_true",
+                    help="v75 rule (A/B: mixed): mutual-nearest-neighbour test on proposals")
+    ap.add_argument("--site-agree", default="1e9,1e9",
+                    help="v75 rule (A/B: mixed): max rot(deg),pos(spreads) disagreement "
+                         "between two sites before the closure is demoted; default off")
+    ap.add_argument("--no-robust-batch", action="store_true",
+                    help="ablation: batch solve without outlier-edge rejection")
     ap.add_argument("--remeasure", action="store_true",
                     help="verify each site with a 4-frame second pass "
                          "(ablation; off by default, see notes)")
@@ -218,7 +220,20 @@ def main():
     paths, gt_full, desc_fn, runner, meta = load_inputs(a)
     key = keyframe_indices(len(gt_full), a.keyframe_stride, a.max_frames)
     gt = gt_full[key]
-    chunks = make_chunks(len(key), a.chunk, a.overlap)
+    sessions = None
+    if a.backbone != "synthetic":
+        npz_ids = np.load(a.gt, allow_pickle=True)
+        if "frame_ids" in npz_ids:
+            fid = np.asarray(npz_ids["frame_ids"])
+            if np.issubdtype(fid.dtype, np.integer) and fid.max() >= 100000:
+                sessions = (fid[key] // 100000).tolist()
+    if sessions is not None and len(set(sessions)) > 1:
+        from smr.stitch.chunks import make_session_chunks
+        chunks = make_session_chunks(sessions, a.chunk, a.overlap)
+        print(f"  {len(set(sessions))} sessions -> chunks never straddle a session boundary; "
+              f"each session start is placed by relocalisation")
+    else:
+        chunks = make_chunks(len(key), a.chunk, a.overlap)
     if paths is not None:
         kpaths = [paths[i] for i in key]
         # pre-flight: every keyframe image must exist BEFORE any model is
@@ -310,7 +325,7 @@ def main():
     dim = descriptors.shape[1]
     sa = [float(x) for x in a.site_agree.split(",")]
     common = dict(n_sites=a.sites, remeasure=a.remeasure, verbose=a.verbose,
-                  desc_thresh=a.desc_thresh, mutual_nn=not a.no_mutual_nn,
+                  desc_thresh=a.desc_thresh, mutual_nn=a.mutual_nn,
                   site_agree_rot=sa[0], site_agree_pos=sa[1])
 
     def scaffold():
@@ -332,10 +347,10 @@ def main():
                 **loops_of(r)))
         if "smr_pgo" in want:
             t2 = time.time()
-            pg, info = posegraph.solve(r, chunks)
+            pg, info = posegraph.solve(r, chunks, robust_reject=not a.no_robust_batch)
             add_row("smr_pgo", pg, r["passes"],
                     dict(pgo_secs=round(time.time() - t2, 2), pgo_cost=info["cost"],
-                         **loops_of(r)))
+                         n_dropped_edges=info.get("n_dropped", 0), **loops_of(r)))
     if "classical" in want:
         st = AnchoredStitcher(DescriptorIndex(), correction="none", **common)
         r = st.run(chunks, cache, runner, descriptors)

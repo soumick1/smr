@@ -76,8 +76,10 @@ def _node_init(result, chunks):
     return nodes
 
 
-def solve(result, chunks, huber=0.5, max_nfev=200, verbose=False):
-    """Batch solve over every node but the first.  Returns (poses, info)."""
+def solve(result, chunks, huber=0.5, max_nfev=200, verbose=False,
+          robust_reject=True, robust_abs=0.3):
+    """Batch solve over every node but the first, then drop outlier loop
+    edges and solve again (robust_reject).  Returns (poses, info)."""
     edges = list(result["edges"])
     K = len(chunks)
     nodes0 = _node_init(result, chunks)
@@ -97,10 +99,31 @@ def solve(result, chunks, huber=0.5, max_nfev=200, verbose=False):
 
     nodes = solve_nodes(nodes0, edges, list(range(1, K)), huber=huber,
                         max_nfev=max_nfev)
+    # ROBUST PASS: a single wrong loop closure dominated the aliasing runs
+    # (TUM floor / room).  After the first solve, loop edges whose residual
+    # is far above the rest (> max(3 x median, robust_abs)) are dropped and
+    # the graph is solved again -- the batch counterpart of a closure the
+    # stream should not have accepted.
+    dropped = []
+    if robust_reject:
+        def res_norm(e, nd):
+            E = sim3.compose(sim3.inverse(e["Z"]), sim3.compose(sim3.inverse(nd[e["c"]]), nd[e["k"]]))
+            v = sim3.to_vec(E); v[0] *= e.get("w_scale", 1.0)
+            return float(np.linalg.norm(v))
+        rn = np.array([res_norm(e, nodes) for e in edges])
+        med = float(np.median(rn)) + 1e-9
+        keep = [e for e, r_ in zip(edges, rn)
+                if not (e["kind"] == "loop" and r_ > max(3.0 * med, robust_abs))]
+        dropped = [e for e in edges if e not in keep]
+        if dropped:
+            edges = keep
+            nodes = solve_nodes(nodes0, edges, list(range(1, K)), huber=huber,
+                                max_nfev=max_nfev)
     owner = result["owner"]
     frames = sorted(result["local"])
     poses = np.stack([sim3.apply(nodes[owner[i]], result["local"][g][None])[0]
                       for i, g in enumerate(frames)])
     return poses, dict(n_edges=len(edges),
                        n_loop_edges=sum(e["kind"] == "loop" for e in edges),
+                       n_dropped=len(dropped),
                        cost0=cost(nodes0), cost=cost(nodes))

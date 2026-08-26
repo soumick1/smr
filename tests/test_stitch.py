@@ -335,3 +335,44 @@ def test_junction_smoothing_restores_within_chunk_accuracy(world, chunks):
         a_in.append(auc_split(r1["est"], world.gt, chunks)["auc_within"])
         assert ate_rmse(r1["est"], world.gt) <= 1.1 * ate_rmse(r0["est"], world.gt)
     assert np.mean(a_in) >= np.mean(a_out) - 0.5
+
+
+def test_session_chunks_never_straddle_a_boundary():
+    from smr.stitch.chunks import make_session_chunks
+    sessions = [0] * 40 + [1] * 30
+    ch = make_session_chunks(sessions, 16, 8)
+    for c in ch:
+        assert len({sessions[i] for i in c}) == 1
+    assert set().union(*ch) == set(range(70))
+
+
+def test_session_start_is_relocalised_by_anchors(world, chunks):
+    """Two 'sessions' of the same world: the second session's first chunk
+    shares no frame with memory and must be placed by relocalisation."""
+    from smr.stitch.chunks import make_session_chunks
+    n = len(world.gt); half = n // 2
+    sessions = [0] * half + [1] * (n - half)
+    ch = make_session_chunks(sessions, 16, 8)
+    cache = PassCache()
+    runner = world.runner(noise=0.01, distortion=0.05, seed=2)
+    r = AnchoredStitcher(ScaffoldIndex(seed=0), n_sites=2).run(ch, cache, runner, world.descriptors)
+    starts = [e for e in r["events"] if e.get("session_start")]
+    assert len(starts) == 1
+    assert any(e.get("loop") and e["loop"]["accepted"] and e["loop"].get("relocalisation")
+               for e in r["events"][starts[0]["chunk"]:starts[0]["chunk"] + 3])
+    assert r["n_loops"] >= 1                     # the relocalisation itself counts as one
+    assert ate_rmse(r["est"], world.gt) < 0.25   # a broken chain would be O(1)
+
+
+def test_robust_batch_drops_an_injected_bad_loop_edge(world, chunks):
+    cache = PassCache()
+    runner = world.runner(noise=0.01, distortion=0.05, seed=1)
+    r = AnchoredStitcher(ScaffoldIndex(seed=0), n_sites=2).run(chunks, cache, runner, world.descriptors)
+    assert r["n_loops"] >= 1
+    bad = dict(c=0, k=len(chunks) - 1, Z=(1.0, sim3.rotmat([0, 1.2, 0]), np.array([2.0, 0, 0])),
+               n=2, kind="loop", w_scale=1.0)
+    r2 = dict(r); r2["edges"] = list(r["edges"]) + [bad]
+    pg_naive, info_n = posegraph.solve(r2, chunks, robust_reject=False)
+    pg_rob, info_r = posegraph.solve(r2, chunks, robust_reject=True)
+    assert info_r["n_dropped"] >= 1
+    assert ate_rmse(pg_rob, world.gt) < ate_rmse(pg_naive, world.gt)

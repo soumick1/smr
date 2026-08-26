@@ -78,8 +78,8 @@ class AnchoredStitcher:
                  remeasure=False, remeasure_rot_deg=8.0,
                  remeasure_dir_deg=20.0, remeasure_ratio=1.5,
                  correction="relax", robust=True, pose_proposals=True,
-                 smooth_junctions=True, mutual_nn=True, site_agree_rot=5.0,
-                 site_agree_pos=0.5, verbose=False):
+                 smooth_junctions=True, mutual_nn=False, site_agree_rot=1e9,
+                 site_agree_pos=1e9, verbose=False):
         self.index = index if index is not None else DescriptorIndex()
         self.n_sites = int(n_sites)
         self.recent_window = recent_window
@@ -259,6 +259,8 @@ class AnchoredStitcher:
         chunk_len = max(len(c) for c in chunks)
         last_closed = 0                 # most recent chunk placed by anchors
         n_rejected = 0
+        recovering = False              # after a session start, until re-anchored
+        prev_scale = 1.0
 
         def bind(gi, T, k):
             stored[gi] = np.asarray(T, float)
@@ -286,9 +288,16 @@ class AnchoredStitcher:
                     bind(gi, P[li], 0)
                 events.append(dict(chunk=0, n_new=len(idx)))
                 continue
-            assert len(overlap) >= 2, (
-                f"chunk {k} shares only {len(overlap)} frames with memory; "
-                f"increase --overlap")
+            session_start = len(overlap) < 2
+            if session_start:
+                # first chunk of a new session: nothing to chain from.  It
+                # is placed by RELOCALISATION -- verified anchor sites only,
+                # scale carried over from the previous pass (all passes
+                # are regauged to unit median translation).  Until a
+                # closure with two agreeing sites has been accepted, the
+                # stretch is in RECOVERY: the drift budget does not apply,
+                # because there is no chain to be consistent with.
+                recovering = True
 
             sites = self._propose_sites(new, descriptors, stored, owner, k,
                                         chunk_len) if descriptors is not None \
@@ -327,9 +336,17 @@ class AnchoredStitcher:
                 good_old = []            # pose-only sites cannot close a loop
 
             # -- chained placement from the overlap
-            A_ov = P[[pos[g] for g in overlap]]
-            B_ov = np.stack([stored[g] for g in overlap])
-            S_A, keep_ov, info_ov = self._fit(A_ov, B_ov)
+            if not session_start:
+                A_ov = P[[pos[g] for g in overlap]]
+                B_ov = np.stack([stored[g] for g in overlap])
+                S_A, keep_ov, info_ov = self._fit(A_ov, B_ov)
+            else:
+                # no chain: continue from the last stored pose with the
+                # previous scale (a placeholder until anchors place it)
+                last = max(stored)
+                S_A = (prev_scale, stored[last][:3, :3] @ P[chunk_pos[0], :3, :3].T,
+                       stored[last][:3, 3] - prev_scale * (stored[last][:3, :3] @ P[chunk_pos[0], :3, :3].T @ P[chunk_pos[0], :3, 3]))
+                keep_ov = np.zeros(0, bool)
             S, loop = S_A, None
             world_chunk = sim3.apply(S_A, P[chunk_pos])
             spread_w = _spread(world_chunk[:, :3, 3])
@@ -409,11 +426,14 @@ class AnchoredStitcher:
                     d_ls = float(abs(np.log(S_B[0] / S_A[0])))
                     ok = (d_rot <= b_rot and d_pos <= b_pos
                           and (d_ls <= b_ls or not scale_from_anchors))
+                    if recovering and n_ok_sites >= 2:
+                        ok = True             # relocalisation: no chain to agree with
                     reason = None if ok else (
                         "rot" if d_rot > b_rot else
                         "pos" if d_pos > b_pos else "scale")
                     loop = dict(anchor_chunk=int(a_min), n_old=len(inl),
                                 n_sites=int(n_ok_sites), n_app_sites=int(n_app_sites),
+                                relocalisation=bool(recovering),
                                 D_rot_deg=d_rot, D_pos_rel=d_pos, D_logscale=d_ls,
                                 baseline_rel=float(baseline_rel),
                                 scale_from_anchors=bool(scale_from_anchors),
@@ -450,7 +470,11 @@ class AnchoredStitcher:
             edges += new_edges
 
             # -- placement / correction
-            if loop and loop["accepted"]:
+            if loop and loop["accepted"] and recovering:
+                S = S_B                       # relocalised: nothing to relax
+                last_closed = k
+                recovering = False
+            elif loop and loop["accepted"]:
                 lo, a_min = loop["stretch"][0], loop["anchor_chunk"]
                 if self.correction == "relax":
                     from .posegraph import solve_nodes
@@ -485,6 +509,7 @@ class AnchoredStitcher:
                 # "none": chained placement, edge recorded
 
             moved = sim3.apply(S, P)
+            prev_scale = float(S[0])
             for gi in new:
                 bind(gi, moved[pos[gi]], k)
             if self.smooth_junctions and loop and loop["accepted"]:
@@ -504,7 +529,8 @@ class AnchoredStitcher:
                     self.index.update_pose(g, T)
             ev = dict(chunk=k, n_new=len(new), n_overlap=len(overlap),
                       n_overlap_inliers=int(keep_ov.sum()), sites=site_log,
-                      loop=loop)
+                      loop=loop, session_start=bool(session_start),
+                      recovering=bool(recovering))
             events.append(ev)
             if self.verbose:
                 if loop and loop["accepted"]:
