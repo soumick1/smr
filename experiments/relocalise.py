@@ -116,7 +116,8 @@ def main():
     index = ScaffoldIndex(N_h=a.N_h, seed=a.seed, desc_dim=map_desc.shape[1])
     res = AnchoredStitcher(index, n_sites=a.sites, desc_thresh=a.desc_thresh).run(
         chunks, cache, runner, map_desc)
-    stream_ate = MemoryMap(res, gt[map_idx], ScaffoldIndex(N_h=64, desc_dim=map_desc.shape[1]), map_desc).map_ate
+    from smr.eval.trajectory import ate_rmse
+    stream_ate = float(ate_rmse(res["est"], gt[map_idx]))
     if a.map_solver == "batch":
         from smr.stitch import posegraph
         pg, info = posegraph.solve(res, chunks)
