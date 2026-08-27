@@ -79,7 +79,7 @@ class AnchoredStitcher:
                  remeasure_dir_deg=20.0, remeasure_ratio=1.5,
                  correction="relax", robust=True, pose_proposals=True,
                  smooth_junctions=True, mutual_nn=False, site_agree_rot=1e9,
-                 site_agree_pos=1e9, verbose=False):
+                 site_agree_pos=1e9, revoke=True, verbose=False):
         self.index = index if index is not None else DescriptorIndex()
         self.n_sites = int(n_sites)
         self.recent_window = recent_window
@@ -105,6 +105,7 @@ class AnchoredStitcher:
         self.smooth_junctions = smooth_junctions
         self.mutual_nn = mutual_nn
         self.site_agree_rot, self.site_agree_pos = site_agree_rot, site_agree_pos
+        self.revoke = revoke
         self.verbose = verbose
 
     # ------------------------------------------------------------- helpers
@@ -261,6 +262,8 @@ class AnchoredStitcher:
         n_rejected = 0
         recovering = False              # after a session start, until re-anchored
         prev_scale = 1.0
+        pending = None                  # last accepted closure: snapshot + evidence
+        n_revoked = 0
 
         def bind(gi, T, k):
             stored[gi] = np.asarray(T, float)
@@ -415,6 +418,7 @@ class AnchoredStitcher:
                             P[[pos[g] for g in inl]],
                             np.stack([stored[g] for g in inl]), S_A[0])
                     D = sim3.compose(S_B, sim3.inverse(S_A))
+                    loop_note = None
                     a_min = min(owner[g] for g in inl)
                     lo = max(a_min, last_closed)
                     n_stretch = max(1, k - lo)
@@ -433,7 +437,7 @@ class AnchoredStitcher:
                         "pos" if d_pos > b_pos else "scale")
                     loop = dict(anchor_chunk=int(a_min), n_old=len(inl),
                                 n_sites=int(n_ok_sites), n_app_sites=int(n_app_sites),
-                                relocalisation=bool(recovering),
+                                relocalisation=bool(recovering), note=loop_note,
                                 D_rot_deg=d_rot, D_pos_rel=d_pos, D_logscale=d_ls,
                                 baseline_rel=float(baseline_rel),
                                 scale_from_anchors=bool(scale_from_anchors),
@@ -442,6 +446,39 @@ class AnchoredStitcher:
                                 accepted=bool(ok), reason=reason,
                                 stretch=[int(lo), int(k)],
                                 applied=self.correction if ok else "rejected")
+                    # REVOCATION.  The closure accepted at the previous chunk is
+                    # provisional.  If THIS chunk brings stronger evidence (>= 2
+                    # verified sites) that disagrees with the chain by more than
+                    # twice the budget, and the previous closure rested on one
+                    # site, the previous closure was the look-alike: restore the
+                    # snapshot taken before it, re-fit the chain, and judge this
+                    # closure against the restored chain.  (Streaming counterpart
+                    # of the batch outlier rejection; one wrong closure on TUM
+                    # floor / room made every later chunk inherit its error.)
+                    if (self.revoke and not ok and pending is not None
+                            and pending["k"] == k - 1 and n_ok_sites >= 2
+                            and pending["n_sites"] <= 1
+                            and (d_rot > 2 * b_rot or d_pos > 2 * b_pos)):
+                        for g, T in pending["snapshot"].items():
+                            stored[g] = T
+                            self.index.update_pose(g, T)
+                        edges = [e for e in edges if e["k"] != pending["k"] or e["kind"] != "loop"]
+                        n_revoked += 1
+                        events[pending["k"]]["loop"]["revoked_at"] = int(k)
+                        # re-fit the chain on the restored overlap and re-judge
+                        A_ov = P[[pos[g] for g in overlap]]
+                        B_ov = np.stack([stored[g] for g in overlap])
+                        S_A, keep_ov, info_ov = self._fit(A_ov, B_ov)
+                        pA = S_A[0] * (S_A[1] @ centroid_pass) + S_A[2]
+                        D = sim3.compose(S_B, sim3.inverse(S_A))
+                        d_rot = rotation_angle_deg(D[1])
+                        d_pos = float(np.linalg.norm(pA - pB)) / spread_w
+                        d_ls = float(abs(np.log(S_B[0] / S_A[0])))
+                        ok = (d_rot <= b_rot and d_pos <= b_pos
+                              and (d_ls <= b_ls or not scale_from_anchors))
+                        reason = None if ok else ("rot" if d_rot > b_rot else "pos" if d_pos > b_pos else "scale")
+                        loop_note = "after revocation"
+                        pending = None
                     if not ok:
                         n_rejected += 1
                         good_old = []            # a rejected closure is no edge
@@ -470,6 +507,9 @@ class AnchoredStitcher:
             edges += new_edges
 
             # -- placement / correction
+            if loop and loop["accepted"]:
+                pending = dict(k=k, n_sites=loop["n_sites"],
+                               snapshot={g: T.copy() for g, T in stored.items()})
             if loop and loop["accepted"] and recovering:
                 S = S_B                       # relocalised: nothing to relax
                 last_closed = k
@@ -553,8 +593,9 @@ class AnchoredStitcher:
         return dict(est=est, passes=passes, edges=edges, events=events,
                     owner=[int(owner[i]) for i in order],
                     local={int(g): local[g] for g in order},
-                    n_loops=sum(1 for e in events if e.get("loop") and e["loop"]["accepted"]),
-                    n_rejected=n_rejected)
+                    n_loops=sum(1 for e in events if e.get("loop") and e["loop"]["accepted"]
+                                and "revoked_at" not in e["loop"]),
+                    n_rejected=n_rejected, n_revoked=n_revoked)
 
 
 def stitch_chained(chunks, cache, runner, robust=True):
