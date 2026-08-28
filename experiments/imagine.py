@@ -31,6 +31,7 @@ import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))          # so `experiments.relocalise` imports when run as a script
 
 from smr.backbones import get_backbone                                      # noqa: E402
 from smr.stitch import AnchoredStitcher, BackboneRunner, PassCache, ScaffoldIndex  # noqa: E402
@@ -119,36 +120,23 @@ def main():
     pg, _ = posegraph.solve(res, chunks)
     res = dict(res); res["est"] = pg
     mmap = MemoryMap(res, gt[map_idx], index, map_desc)
+    # every id below is a KEYFRAME POSITION 0..n_map-1 (the stitcher's space)
+    assert set(mmap.frames) == set(range(len(map_idx))), "keyframe keying broken"
     print(f"  map ATE {mmap.map_ate:.3f} m, {res['n_loops']} closures")
 
     # ---------------- surfel bank: lift each chunk once, place metrically
+    from smr.stitch.imagine import build_bank
     bb = get_backbone(a.backbone, device=a.device)
-    pts_all, col_all, own_all = [], [], []
     t0 = time.time()
+    owner_map = {}
     for ci, ch in enumerate(chunks):
-        rv = bb.infer([map_paths[i] for i in ch])
-        A = rv.poses
-        B = np.stack([mmap.pose[map_idx[i]] for i in ch])
-        S, _, _ = sim3.fit_poses_robust(A, B, min_inliers=3)
-        H, W = rv.depth.shape[1:3]
-        Kp = rv.intrinsics
-        ys, xs = np.mgrid[0:H:a.pixel_stride, 0:W:a.pixel_stride]
-        for li, gi in enumerate(ch):
-            if mmap.owner[map_idx[gi]] != ci:      # bind each keyframe once, by its owner chunk
-                continue
-            d = rv.depth[li][ys, xs]
-            ok = d > 1e-6
-            if hasattr(rv, "conf") and rv.conf is not None:
-                c = rv.conf[li][ys, xs]; ok &= c >= np.quantile(c[ok], 0.3) if ok.any() else ok
-            K_ = Kp[li] if Kp.ndim == 3 else Kp
-            X = (xs[ok] - K_[0, 2]) / K_[0, 0] * d[ok]
-            Y = (ys[ok] - K_[1, 2]) / K_[1, 1] * d[ok]
-            Pcam = np.stack([X, Y, d[ok]], 1)
-            Pw_pass = Pcam @ rv.poses[li][:3, :3].T + rv.poses[li][:3, 3]
-            Pw = S[0] * (Pw_pass @ S[1].T) + S[2]
-            pts_all.append(Pw); own_all.append(np.full(len(Pw), map_idx[gi]))
-            col_all.append(rv.rgb[li][ys, xs][ok] / (255.0 if rv.rgb.max() > 2 else 1.0))
-    pts = np.concatenate(pts_all); cols = np.concatenate(col_all); owners = np.concatenate(own_all)
+        for gi in ch:
+            owner_map.setdefault(gi, ci)
+    bank = build_bank(lambda ps: bb.infer(ps), map_paths, chunks, mmap.pose,
+                      owner_map, sim3.fit_poses_robust, pixel_stride=a.pixel_stride)
+    pts = np.concatenate([v["pts"] for v in bank.values()])
+    cols = np.concatenate([v["col"] for v in bank.values()])
+    owners = np.concatenate([np.full(len(v["pts"]), k) for k, v in bank.items()])
     print(f"  bank: {len(pts):,} surfels from {len(chunks)} passes ({time.time() - t0:.0f}s)")
 
     # ---------------- query machinery (start localisation, T2-style)
@@ -186,8 +174,8 @@ def main():
             g_near = [mmap.frames[j] for j in near[: a.rerun_k]]
             for row in rows:
                 if row == "nearest":
-                    est = load_rgb(map_paths[map_idx.index(g_near[0])], hw)
-                    de = load_depth(depth_path(map_paths[map_idx.index(g_near[0])]), hw)
+                    est = load_rgb(map_paths[g_near[0]], hw)
+                    de = load_depth(depth_path(map_paths[g_near[0]]), hw)
                     sc = score_view(est, de, np.ones(hw, bool), rgb_gt, dep_gt, lp)
                 elif row == "reproject":
                     m = owners == g_near[0]
@@ -197,7 +185,7 @@ def main():
                     e, d, msk = splat_points(pts, cols, Tk, Kr, hw)
                     sc = score_view(e, d, msk, rgb_gt, dep_gt, lp)
                 elif row == "rerun":
-                    rv = bb.infer([map_paths[map_idx.index(g)] for g in g_near])
+                    rv = bb.infer([map_paths[g] for g in g_near])
                     S, _, _ = sim3.fit_poses_robust(rv.poses, np.stack([mmap.pose[g] for g in g_near]), min_inliers=3)
                     H2, W2 = rv.depth.shape[1:3]
                     ys, xs = np.mgrid[0:H2:a.pixel_stride, 0:W2:a.pixel_stride]

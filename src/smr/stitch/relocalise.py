@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..eval.trajectory import align_to_gt, rotation_angle_deg
+from ..eval.trajectory import align_to_gt, ate_rmse, rotation_angle_deg
 from . import sim3
 from .memory_index import DescriptorIndex
 
@@ -198,3 +198,194 @@ def summarise(errs, thresholds=((0.05, 5.0), (0.10, 10.0), (0.25, 25.0))):
     for tt, rr in thresholds:
         out[f"recall_{int(tt * 100)}cm_{int(rr)}deg"] = float(np.mean((t <= tt) & (r <= rr))) if len(t) else float("nan")
     return out
+
+
+# ------------------------------------------------- session registration ----
+def register_sessions(session_results, session_desc, run_pair_pass,
+                      pairs_per_session=24, min_cluster=3,
+                      agree_rot_deg=5.0, agree_pos_rel=0.3, verbose=False):
+    """Build one map from independently stitched sessions.
+
+    Multi-session stitching fails on aliased scenes at the REGISTRATION
+    step (redkitchen: every intra-session map is fine, ATE 0.026, and the
+    combined map is 0.725).  So register explicitly: for each new session,
+    propose many cross-session appearance pairs, place each pair with one
+    small pass, and take the CONSENSUS cluster of the per-pair Sim(3)
+    estimates -- wrong-counter/wrong-floor pairs form minority clusters and
+    are discarded, which per-pair verification alone cannot do.
+
+    session_results: {sid: dict(local={kf: pose}, frames=[kf...])} in each
+    session's own gauge.  session_desc: {sid: {kf: descriptor}}.
+    run_pair_pass(frames_a, frames_b) -> poses of frames_a + frames_b in
+    one pass (session order preserved).
+    Returns {sid: (s, R, t)} mapping each session into session 0's frame,
+    plus a report.
+    """
+    sids = sorted(session_results)
+    T = {sids[0]: (1.0, np.eye(3), np.zeros(3))}
+    registered = {g: sim3.apply_one(T[sids[0]], P)
+                  for g, P in session_results[sids[0]]["local"].items()}
+    reg_desc = dict(session_desc[sids[0]])
+    reg_owner = {g: sids[0] for g in registered}
+    report = {}
+    for sid in sids[1:]:
+        loc = session_results[sid]["local"]
+        frames = sorted(loc)
+        spread = float(np.std(np.stack([registered[g][:3, 3] for g in registered]), 0).mean()) + 1e-9
+        # -- propose diverse cross-session pairs by appearance
+        reg_ids = list(reg_desc)
+        R_desc = np.stack([reg_desc[g] for g in reg_ids])
+        cands = []
+        for i in frames:
+            sims = R_desc @ session_desc[sid][i]
+            j = int(np.argmax(sims))
+            cands.append((float(sims[j]), i, reg_ids[j]))
+        cands.sort(reverse=True)
+        used_i, used_j, pairs = set(), {}, []
+        for cos, i, j in cands:
+            if cos < 0.4 or i in used_i or used_j.get(j, 0) >= 2:
+                continue
+            pairs.append((i, j)); used_i.add(i); used_j[j] = used_j.get(j, 0) + 1
+            if len(pairs) >= pairs_per_session:
+                break
+        # -- place each pair with one small pass; one Sim(3) estimate each
+        ests = []
+        for i, j in pairs:
+            ia = [g for g in (i, i + 3, i - 3) if g in loc][:2]
+            jb = [g for g in (j, j + 3, j - 3) if g in registered][:2]
+            if len(ia) < 2 or len(jb) < 2:
+                continue
+            P = run_pair_pass(ia, jb)
+            Sa, ia_ok = sim3.fit_poses(P[: len(ia)], np.stack([loc[g] for g in ia]))
+            Sb, jb_ok = sim3.fit_poses(P[len(ia):], np.stack([registered[g] for g in jb]))
+            if not (ia_ok.get("scale_ok", True) and jb_ok.get("scale_ok", True)):
+                continue
+            ests.append((sim3.compose(Sb, sim3.inverse(Sa)), (i, j), P, ia, jb, Sa))
+        # -- consensus cluster over the estimates
+        c0 = np.mean(np.stack([loc[g][:3, 3] for g in frames]), 0)
+        best, best_members = None, []
+        for k, (Tk, *_r) in enumerate(ests):
+            members = []
+            pk = Tk[0] * (Tk[1] @ c0) + Tk[2]
+            for l, (Tl, *_r2) in enumerate(ests):
+                d = sim3.compose(Tk, sim3.inverse(Tl))
+                pl = Tl[0] * (Tl[1] @ c0) + Tl[2]
+                if rotation_angle_deg(d[1]) <= agree_rot_deg and                         np.linalg.norm(pk - pl) <= agree_pos_rel * spread:
+                    members.append(l)
+            if len(members) > len(best_members):
+                best, best_members = k, members
+        ok = len(best_members) >= min_cluster
+        if ok:
+            # joint robust refit over every inlier pair's frames
+            A, B = [], []
+            for l in best_members:
+                _, _, P, ia, jb, Sa = ests[l]
+                for gi_, g in enumerate(jb):
+                    # ref frame expressed in the SESSION's gauge (Sa: pass -> session)
+                    A.append(sim3.apply_one(Sa, P[len(ia) + gi_]))
+                    B.append(registered[g])
+            # A: ref frames expressed in the session's gauge -> fit session->ref
+            S, keep, _ = sim3.fit_poses_robust(np.stack(A), np.stack(B), min_inliers=3)
+            T[sid] = S
+        else:
+            T[sid] = None                      # unregistered: reported, not hidden
+        report[sid] = dict(n_pairs=len(pairs), n_estimates=len(ests),
+                           cluster=len(best_members), registered=bool(ok))
+        if ok:
+            for g in frames:
+                registered[g] = sim3.apply_one(T[sid], loc[g])
+                reg_owner[g] = sid
+            reg_desc.update(session_desc[sid])
+        if verbose:
+            print(f"    session {sid}: {len(pairs)} pairs -> {len(ests)} estimates, "
+                  f"cluster {len(best_members)} -> {'OK' if ok else 'UNREGISTERED'}")
+    return T, registered, reg_owner, report
+
+
+# ------------------------------------------------------- dense placement ----
+def localise_dense(mmap, bank, q_desc, run_dense_pass, mode="smr", n_sites=2,
+                   gt_pose=None, site_rot_deg=10.0, site_dir_deg=25.0,
+                   agree_rot_deg=10.0, agree_pos=0.3, K=15, max_pts=4000, **kw):
+    """Place one query by dense 3D-3D correspondence: the pass's depth for
+    each VERIFIED anchor, unprojected at the same pixels the bank stored in
+    metric world coordinates -> thousands of exact pairs -> robust Umeyama.
+    Same proposals, same verification, same consensus rules as `localise`;
+    only the fit changes (4 camera poses -> ~10^3-10^4 point pairs).
+    run_dense_pass(anchors) must return an object with .poses .depth
+    .intrinsics (and optionally .conf), query first."""
+    sites = mmap.sites_for(q_desc, mode, n_sites=n_sites, gt_pose=gt_pose, K=K, **kw)
+    if not sites:
+        return dict(T=None, reason="no_proposal", n_sites=0)
+    anchors = []
+    for j, p_ in sites:
+        for g in (j, p_):
+            if g is not None and g not in anchors and g in bank:
+                anchors.append(g)
+    if not anchors:
+        return dict(T=None, reason="no_bank_anchor", n_sites=0)
+    rv = run_dense_pass(anchors)
+    P = rv.poses
+    pos = {g: i + 1 for i, g in enumerate(anchors)}
+    stored = mmap.pose
+
+    def anchor_pairs(g):
+        b = bank[g]
+        li = pos[g]
+        d = rv.depth[li][b["pix"][:, 0], b["pix"][:, 1]]
+        ok = d > 1e-6
+        K_ = rv.intrinsics[li] if rv.intrinsics.ndim == 3 else rv.intrinsics
+        X = (b["pix"][ok, 1] - K_[0, 2]) / K_[0, 0] * d[ok]
+        Y = (b["pix"][ok, 0] - K_[1, 2]) / K_[1, 1] * d[ok]
+        Pc = np.stack([X, Y, d[ok]], 1)
+        Pp = Pc @ P[li][:3, :3].T + P[li][:3, 3]        # pass world
+        return Pp, b["pts"][ok]
+
+    if mode == "lastk":
+        A, B = [], []
+        for g in anchors:
+            a, b = anchor_pairs(g)
+            A.append(a); B.append(b)
+        A, B = np.concatenate(A), np.concatenate(B)
+        if len(A) > max_pts:
+            sel = np.random.default_rng(0).choice(len(A), max_pts, replace=False)
+            A, B = A[sel], B[sel]
+        S, keep, info = sim3.fit_points_robust(A, B)
+        return dict(T=sim3.apply(S, P[:1])[0], reason="ok", n_sites=len(anchors))
+
+    good, fits = [], []
+    for j, p_ in sites:
+        if j not in pos or p_ not in pos:
+            continue
+        rel_pass = np.linalg.inv(P[pos[j]]) @ P[pos[p_]]
+        rel_st = np.linalg.inv(stored[j]) @ stored[p_]
+        rot = rotation_angle_deg(rel_pass[:3, :3].T @ rel_st[:3, :3])
+        dr = _dir_err_deg(rel_pass[:3, 3], rel_st[:3, 3])
+        if rot < site_rot_deg and dr < site_dir_deg:
+            A, B = [], []
+            for g in (j, p_):
+                a, b = anchor_pairs(g)
+                A.append(a); B.append(b)
+            A, B = np.concatenate(A), np.concatenate(B)
+            if len(A) < 50:
+                continue
+            if len(A) > max_pts:
+                sel = np.random.default_rng(0).choice(len(A), max_pts, replace=False)
+                A, B = A[sel], B[sel]
+            S, keep, info = sim3.fit_points_robust(A, B)
+            good.append((j, p_)); fits.append((S, A, B))
+    if not good:
+        return dict(T=None, reason="no_verified_site", n_sites=0)
+    if len(good) >= 2:
+        qs = [sim3.apply(S, P[:1])[0] for S, _, _ in fits]
+        rot_d = rotation_angle_deg(qs[0][:3, :3].T @ qs[1][:3, :3])
+        pos_d = float(np.linalg.norm(qs[0][:3, 3] - qs[1][:3, 3]))
+        if rot_d <= agree_rot_deg and pos_d <= agree_pos:
+            A = np.concatenate([f[1] for f in fits]); B = np.concatenate([f[2] for f in fits])
+            if len(A) > max_pts:
+                sel = np.random.default_rng(0).choice(len(A), max_pts, replace=False)
+                A, B = A[sel], B[sel]
+            S, keep, info = sim3.fit_points_robust(A, B)
+            return dict(T=sim3.apply(S, P[:1])[0], reason="consensus", n_sites=2)
+        return dict(T=sim3.apply(fits[0][0], P[:1])[0], reason="ambiguous", n_sites=1,
+                    disagreement=dict(rot_deg=rot_d, pos=pos_d))
+    return dict(T=sim3.apply(fits[0][0], P[:1])[0], reason="single_site", n_sites=1)

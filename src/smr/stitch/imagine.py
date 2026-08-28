@@ -118,3 +118,39 @@ def score_view(rgb_est, dep_est, mask, rgb_gt, dep_gt, lp=None):
     if lp is not None:
         out["lpips"] = lp(rgb_est, rgb_gt)
     return out
+
+
+def build_bank(infer_fn, map_paths, chunks, pose_of, owner_of, fit_robust,
+               pixel_stride=5, conf_keep=0.3):
+    """Lift every map keyframe ONCE (its owner chunk's pass) into metric world
+    points, pixel-indexed, so dense 3D-3D placement and view readout share one
+    store.  pose_of/owner_of are keyed by KEYFRAME POSITION.  Returns
+    dict(kf -> dict(pix=(M,2) int yx, pts=(M,3) world, col=(M,3)))."""
+    bank = {}
+    for ci, ch in enumerate(chunks):
+        rv = infer_fn([map_paths[i] for i in ch])
+        A = rv.poses
+        B = np.stack([pose_of[i] for i in ch])
+        S, _, _ = fit_robust(A, B, min_inliers=3)
+        H, W = rv.depth.shape[1:3]
+        ys, xs = np.mgrid[0:H:pixel_stride, 0:W:pixel_stride]
+        for li, gi in enumerate(ch):
+            if owner_of[gi] != ci:
+                continue
+            d = rv.depth[li][ys, xs]
+            ok = d > 1e-6
+            conf = getattr(rv, "conf", None)
+            if conf is not None and ok.any():
+                c = conf[li][ys, xs]
+                ok &= c >= np.quantile(c[ok], conf_keep)
+            K_ = rv.intrinsics[li] if rv.intrinsics.ndim == 3 else rv.intrinsics
+            X = (xs[ok] - K_[0, 2]) / K_[0, 0] * d[ok]
+            Y = (ys[ok] - K_[1, 2]) / K_[1, 1] * d[ok]
+            Pc = np.stack([X, Y, d[ok]], 1)
+            Pw = Pc @ rv.poses[li][:3, :3].T + rv.poses[li][:3, 3]
+            Pm = S[0] * (Pw @ S[1].T) + S[2]
+            col = rv.rgb[li][ys, xs][ok]
+            bank[gi] = dict(pix=np.stack([ys[ok], xs[ok]], 1).astype(np.int32),
+                            pts=Pm.astype(np.float64),
+                            col=(col / (255.0 if col.max() > 2 else 1.0)).astype(np.float32))
+    return bank

@@ -77,6 +77,22 @@ def main():
     ap.add_argument("--rows", default="lastk,plain,smr,oracle")
     ap.add_argument("--corrupt", default="none",
                     help="comma list of query degradations: none, gauss:s, occlude:f, blur:px, dark:f")
+    ap.add_argument("--placement", default="pose", choices=["pose", "dense"],
+                    help="'dense': place queries by robust 3D-3D Umeyama over the "
+                         "anchors' pass depth vs the surfel bank (thousands of "
+                         "pixel-exact pairs) instead of 4 camera poses")
+    ap.add_argument("--pixel-stride", type=int, default=5)
+    ap.add_argument("--map-mode", default="joint", choices=["joint", "register"],
+                    help="'register': stitch each session alone (works even on aliased "
+                         "scenes), then register sessions by consensus over many "
+                         "per-pair placements -- the fix for redkitchen-class maps")
+    ap.add_argument("--refine", action="store_true",
+                    help="second placement pass against the map keyframes nearest "
+                         "the first estimate (spatial verification)")
+    ap.add_argument("--map-poses", default="smr", choices=["smr", "gt"],
+                    help="'gt': bind map keyframes at their ground-truth poses (no "
+                         "stitching) -- the mapping-error-free ablation that separates "
+                         "the map's error from the relocalisation machinery")
     ap.add_argument("--map-solver", default="batch", choices=["stream", "batch"],
                     help="mapping is offline: the batch solve (with outlier-edge rejection) "
                          "gives the better map, and a query inherits its anchors' map error")
@@ -114,25 +130,142 @@ def main():
     chunks = make_session_chunks([int(sess[i]) for i in map_idx], a.chunk, a.overlap)
     t0 = time.time()
     index = ScaffoldIndex(N_h=a.N_h, seed=a.seed, desc_dim=map_desc.shape[1])
-    res = AnchoredStitcher(index, n_sites=a.sites, desc_thresh=a.desc_thresh).run(
-        chunks, cache, runner, map_desc)
-    from smr.eval.trajectory import ate_rmse
-    stream_ate = float(ate_rmse(res["est"], gt[map_idx]))
-    if a.map_solver == "batch":
-        from smr.stitch import posegraph
-        pg, info = posegraph.solve(res, chunks)
-        res = dict(res); res["est"] = pg
-    mmap = MemoryMap(res, gt[map_idx], index, map_desc)
-    print(f"  map: {len(chunks)} chunks, {res['n_loops']} closures, ATE {mmap.map_ate:.3f} m "
-          f"({a.map_solver}; streaming {stream_ate:.3f}) ({time.time() - t0:.0f}s)")
+    if a.map_poses == "gt":
+        # perfect-map ablation: bind at ground-truth keyframe poses, no
+        # stitching.  Owners in blocks of `chunk` keep the partner logic.
+        # keyed by KEYFRAME POSITION 0..n-1, exactly like the stitched path
+        # (the +-3 partner lookup works in keyframe space, not frame space)
+        mmap = MemoryMap.__new__(MemoryMap)
+        mmap.align = (1.0, np.eye(3), np.zeros(3))
+        mmap.frames = list(range(len(map_idx)))
+        mmap.pose = {i: gt[map_idx[i]].copy() for i in mmap.frames}
+        mmap.owner = {i: i // a.chunk for i in mmap.frames}
+        mmap.index = index
+        for i in mmap.frames:
+            index.add(i, mmap.pose[i], map_desc[i])
+        mmap.descriptors = map_desc
+        mmap.map_ate = 0.0
+        stream_ate = 0.0
+        res = dict(n_loops=0)
+        print(f"  map: GT poses (mapping-error-free ablation), {len(map_idx)} keyframes")
+    elif a.map_mode == "register":
+        from smr.stitch.chunks import make_chunks
+        from smr.stitch.relocalise import register_sessions
+        from smr.eval.trajectory import ate_rmse
+        sess_kf = [int(sess[i]) for i in map_idx]
+        by_sid = {}
+        for pos_i, sid in enumerate(sess_kf):
+            by_sid.setdefault(sid, []).append(pos_i)
+        session_results, session_desc = {}, {}
+        for sid, members in by_sid.items():
+            sub_paths = [map_paths[i] for i in members]
+            sub_runner = BackboneRunner(a.backbone, sub_paths, device=a.device)
+            sub_cache = PassCache(cache_dir / f"{tag}_sess{sid}.npy")
+            sub_chunks = make_chunks(len(members), a.chunk, a.overlap)
+            sub_index = ScaffoldIndex(N_h=256, seed=a.seed, desc_dim=map_desc.shape[1])
+            r = AnchoredStitcher(sub_index, n_sites=a.sites, desc_thresh=a.desc_thresh).run(
+                sub_chunks, sub_cache, sub_runner, map_desc[members])
+            from smr.stitch import posegraph as _pg
+            pgp, _ = _pg.solve(r, sub_chunks)
+            session_results[sid] = dict(local={members[i]: pgp[i] for i in range(len(members))},
+                                        frames=[members[i] for i in range(len(members))])
+            session_desc[sid] = {members[i]: map_desc[members[i]] for i in range(len(members))}
+        pair_runner = BackboneRunner(a.backbone, map_paths, device=a.device)
+        pair_cache = PassCache(cache_dir / f"{tag}_pairs.npy")
+
+        def run_pair_pass(fa, fb):
+            return pair_cache.get([int(g) for g in fa] + [int(g) for g in fb], pair_runner)["poses"]
+
+        Ts, registered, reg_owner, rep = register_sessions(
+            session_results, session_desc, run_pair_pass, verbose=True)
+        n_unreg = sum(1 for v in Ts.values() if v is None)
+        # only registered frames enter the map; est rows follow sorted frame order
+        reg_frames = sorted(registered)
+        est = np.stack([registered[i] for i in reg_frames])
+        gt_reg = gt[[map_idx[i] for i in reg_frames]]
+        # populate the MAIN index (joint mode fills it during stitching;
+        # register mode must do it here or MemoryMap has nothing to update)
+        for i in reg_frames:
+            index.add(i, registered[i], map_desc[i])
+        res = dict(local={i: registered[i] for i in reg_frames},
+                   est=est, owner=[reg_owner[i] for i in reg_frames],
+                   n_loops=sum(r_["cluster"] for r_ in rep.values()))
+        stream_ate = float(ate_rmse(est, gt_reg))
+        mmap = MemoryMap(res, gt_reg, index, map_desc)
+        print(f"  map (register): {len(by_sid)} sessions, {n_unreg} unregistered, "
+              f"ATE {mmap.map_ate:.3f} m over {len(reg_frames)} keyframes; "
+              f"clusters {[rep[s]['cluster'] for s in sorted(rep)]}")
+    else:
+        res = AnchoredStitcher(index, n_sites=a.sites, desc_thresh=a.desc_thresh).run(
+            chunks, cache, runner, map_desc)
+        from smr.eval.trajectory import ate_rmse
+        stream_ate = float(ate_rmse(res["est"], gt[map_idx]))
+        if a.map_solver == "batch":
+            from smr.stitch import posegraph
+            pg, info = posegraph.solve(res, chunks)
+            res = dict(res); res["est"] = pg
+        mmap = MemoryMap(res, gt[map_idx], index, map_desc)
+        print(f"  map: {len(chunks)} chunks, {res['n_loops']} closures, ATE {mmap.map_ate:.3f} m "
+              f"({a.map_solver}; streaming {stream_ate:.3f}) ({time.time() - t0:.0f}s)")
+    if a.map_mode == "register" and a.map_poses != "gt":
+        pass  # mmap already built above
     plain = DescriptorIndex()
     for g in mmap.frames:
         plain.add(g, mmap.pose[g], map_desc[g])
+
+    bank = None
+    dense_bb = None
+    if a.placement == "dense":
+        from smr.backbones import get_backbone
+        from smr.stitch import sim3 as _s3
+        from smr.stitch.imagine import build_bank
+        bank_file = cache_dir / f"{tag}_{a.map_mode}_bank{a.pixel_stride}.npz"
+        dense_bb = get_backbone(a.backbone, device=a.device)
+        if bank_file.exists():
+            z = np.load(bank_file)
+            bank = {}
+            for kf in np.unique(z["kf"]):
+                m = z["kf"] == kf
+                bank[int(kf)] = dict(pix=z["pix"][m], pts=z["pts"][m], col=z["col"][m])
+            print(f"  bank: {len(z['kf']):,} surfels loaded ({len(bank)} keyframes)")
+        else:
+            if a.map_mode == "register":
+                bank_chunks = []
+                for sid in sorted({int(s) for s in sess[map_idx]} if False else set()):
+                    pass
+                # per-session chunks in keyframe-position space
+                from smr.stitch.chunks import make_chunks as _mc
+                bank_chunks = []
+                by_sid2 = {}
+                for pos_i, sid in enumerate([int(sess[i]) for i in map_idx]):
+                    by_sid2.setdefault(sid, []).append(pos_i)
+                for sid, members in by_sid2.items():
+                    for c in _mc(len(members), a.chunk, a.overlap):
+                        bank_chunks.append([members[i] for i in c])
+            else:
+                bank_chunks = chunks
+            owner_map = {}
+            for ci, ch in enumerate(bank_chunks):
+                for gi in ch:
+                    owner_map.setdefault(gi, ci)
+            t0b = time.time()
+            bank = build_bank(lambda ps: dense_bb.infer(ps), map_paths, bank_chunks,
+                              mmap.pose, owner_map, _s3.fit_poses_robust,
+                              pixel_stride=a.pixel_stride)
+            bank = {k: v for k, v in bank.items() if k in mmap.pose}
+            kf = np.concatenate([np.full(len(v["pts"]), k, np.int32) for k, v in bank.items()])
+            np.savez_compressed(bank_file, kf=kf,
+                                pix=np.concatenate([v["pix"] for v in bank.values()]),
+                                pts=np.concatenate([v["pts"] for v in bank.values()]).astype(np.float32),
+                                col=np.concatenate([v["col"] for v in bank.values()]).astype(np.float16))
+            print(f"  bank: {len(kf):,} surfels from {len(bank_chunks)} passes "
+                  f"({time.time() - t0b:.0f}s) -> {bank_file.name}")
     mmap_plain = MemoryMap.__new__(MemoryMap)
     mmap_plain.__dict__.update(mmap.__dict__); mmap_plain.index = plain
 
     # ---------------------------------------------------------- queries
-    report = dict(scene=scene, backbone=a.backbone, map_seqs=map_seqs, query_seqs=q_seqs,
+    report = dict(scene=scene, backbone=a.backbone, placement=a.placement,
+                  map_seqs=map_seqs, query_seqs=q_seqs,
                   n_map=len(map_idx), n_queries=len(q_idx), map_ate=mmap.map_ate,
                   map_ate_stream=stream_ate, map_solver=a.map_solver,
                   map_loops=res["n_loops"], results={})
@@ -160,8 +293,40 @@ def main():
                 def run_pass(anchors, q_global=q_global):
                     return qcache.get([q_global] + [int(g) for g in anchors], qrunner)["poses"]
 
-                out = localise(m, q_desc[qi], run_pass, mode=row, n_sites=a.sites,
-                               gt_pose=gt[gi], K=a.K, desc_thresh=a.desc_thresh)
+                if a.placement == "dense":
+                    from smr.stitch.relocalise import localise_dense
+                    qp = qpaths[qi]
+
+                    def run_dense(anchors, qp=qp):
+                        return dense_bb.infer([qp] + [map_paths[int(g)] for g in anchors])
+
+                    out = localise_dense(m, bank, q_desc[qi], run_dense, mode=row,
+                                         n_sites=a.sites, gt_pose=gt[gi], K=a.K,
+                                         desc_thresh=a.desc_thresh)
+                else:
+                    out = localise(m, q_desc[qi], run_pass, mode=row, n_sites=a.sites,
+                                   gt_pose=gt[gi], K=a.K, desc_thresh=a.desc_thresh)
+                if a.refine and out["T"] is not None and row in ("plain", "smr"):
+                    cen = np.stack([m.pose[g][:3, 3] for g in m.frames])
+                    near = np.argsort(np.linalg.norm(cen - out["T"][:3, 3], axis=1))
+                    anchors2, used = [], set()
+                    for j in near:
+                        g = m.frames[j]; oc = m.owner[g]
+                        if oc in used: continue
+                        pr = g + 3 if (g + 3) in m.pose and m.owner.get(g + 3) == oc else (g - 3 if (g - 3) in m.pose else None)
+                        if pr is None: continue
+                        anchors2 += [g, pr]; used.add(oc)
+                        if len(used) == 2: break
+                    if len(anchors2) == 4:
+                        P2 = run_pass(anchors2)
+                        A2 = P2[1:]; B2 = np.stack([m.pose[g] for g in anchors2])
+                        from smr.stitch import sim3 as _s3
+                        S2, keep2, _ = _s3.fit_poses_robust(A2, B2, min_inliers=3)
+                        T2 = _s3.apply(S2, P2[:1])[0]
+                        from smr.eval.trajectory import rotation_angle_deg as _rad
+                        if np.linalg.norm(T2[:3, 3] - out["T"][:3, 3]) < 0.5 and \
+                                _rad(T2[:3, :3].T @ out["T"][:3, :3]) < 15:
+                            out["T"] = T2
                 errs.append(pose_error(out["T"], gt[gi]))
                 reasons[out["reason"]] = reasons.get(out["reason"], 0) + 1
             s = summarise(errs)

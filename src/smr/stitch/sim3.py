@@ -165,3 +165,43 @@ def fit_poses_fixed_scale(A, B, s):
     R = U @ D @ Vt
     ma, mb = A[:, :3, 3].mean(0), B[:, :3, 3].mean(0)
     return float(s), R, mb - s * (R @ ma)
+
+
+def apply_one(S, T):
+    """Apply a similarity to a single 4x4 pose."""
+    return apply(S, T[None])[0]
+
+
+def fit_points(A, B):
+    """Umeyama similarity on point sets: S such that s R A + t ~= B."""
+    A = np.asarray(A, float); B = np.asarray(B, float)
+    muA, muB = A.mean(0), B.mean(0)
+    Ac, Bc = A - muA, B - muB
+    cov = Bc.T @ Ac / len(A)
+    U, S, Vt = np.linalg.svd(cov)
+    d = np.sign(np.linalg.det(U @ Vt))
+    D = np.array([1.0, 1.0, d])
+    R = U @ np.diag(D) @ Vt
+    varA = float((Ac ** 2).sum()) / len(A)
+    s = float((S * D).sum()) / max(varA, 1e-12)
+    t_ = muB - s * (R @ muA)
+    return (s, R, t_)
+
+
+def fit_points_robust(A, B, iters=3, factor=3.0, min_inliers=20):
+    """fit_points with iterative outlier rejection (residual > factor x median)."""
+    A = np.asarray(A, float); B = np.asarray(B, float)
+    keep = np.ones(len(A), bool)
+    S = fit_points(A, B)
+    for _ in range(iters):
+        res = np.linalg.norm((S[0] * (A @ S[1].T) + S[2]) - B, axis=1)
+        med = float(np.median(res[keep])) + 1e-9
+        new = res <= factor * med
+        if new.sum() < min_inliers or new.sum() == keep.sum():
+            keep = new if new.sum() >= min_inliers else keep
+            break
+        keep = new
+        S = fit_points(A[keep], B[keep])
+    res = np.linalg.norm((S[0] * (A @ S[1].T) + S[2]) - B, axis=1)
+    return S, keep, dict(med_res=float(np.median(res[keep])) if keep.any() else float("inf"),
+                         n=int(keep.sum()))
