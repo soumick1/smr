@@ -49,7 +49,7 @@ from smr.stitch import (AnchoredStitcher, BackboneRunner, DescriptorIndex,  # no
                         keyframe_indices, make_chunks, posegraph, probe,
                         stitch_chained)
 
-ROW_ORDER = ["chained", "smr", "smr_pgo", "classical", "smr_jump", "plain"]
+ROW_ORDER = ["chained", "smr", "smr_pgo", "smr_pgo_dense", "classical", "smr_jump", "plain"]
 
 
 def load_inputs(a):
@@ -348,6 +348,18 @@ def main():
         if "smr_pgo" in want:
             t2 = time.time()
             pg, info = posegraph.solve(r, chunks, robust_reject=not a.no_robust_batch)
+            if "smr_pgo_dense" in want and a.backbone != "synthetic":
+                from smr.backbones import get_backbone
+                from smr.stitch import dense_edges
+                t3 = time.time()
+                bb_d = get_backbone(a.backbone, device=a.device)
+                kf_paths = [paths[i] for i in key]
+                rd = dense_edges.remeasure(r, chunks, kf_paths,
+                                           lambda ps: bb_d.infer(ps), verbose=True)
+                pgd, infod = posegraph.solve(rd, chunks, robust_reject=not a.no_robust_batch)
+                add_row("smr_pgo_dense", pgd, r["passes"],
+                        dict(pgo_secs=round(time.time() - t3, 2), pgo_cost=infod["cost"],
+                             n_dropped_edges=infod.get("n_dropped", 0), **loops_of(r)))
             add_row("smr_pgo", pg, r["passes"],
                     dict(pgo_secs=round(time.time() - t2, 2), pgo_cost=info["cost"],
                          n_dropped_edges=info.get("n_dropped", 0), **loops_of(r)))
