@@ -138,18 +138,23 @@ def main():
                   map_loops=res["n_loops"], results={})
     rows = [r for r in a.rows.split(",") if r]
     for spec in [s.strip() for s in a.corrupt.split(",") if s.strip()]:
+        qtag = f"{tag}_q{''.join(map(str, q_seqs))}_qs{a.query_stride}_{spec.replace(':', '_')}"
         qpaths = corrupted_paths([paths[i] for i in q_idx], spec,
-                                 ROOT / "outputs" / "reloc_queries" / scene, seed=a.seed)
+                                 ROOT / "outputs" / "reloc_queries" / f"{scene}_qs{a.query_stride}",
+                                 seed=a.seed)
         q_desc = descriptors_for(qpaths, a.descriptor, a.device,
-                                 cache_dir / f"{tag}_q{''.join(map(str, q_seqs))}_{spec.replace(':', '_')}.desc_{a.descriptor}.npy")
+                                 cache_dir / f"{qtag}.desc_{a.descriptor}.npy")
         all_paths = map_paths + qpaths
         qrunner = BackboneRunner(a.backbone, all_paths, device=a.device)
-        qcache = PassCache(cache_dir / f"{tag}_q{''.join(map(str, q_seqs))}_{spec.replace(':', '_')}.npy")
+        qcache = PassCache(cache_dir / f"{qtag}.npy")
         report["results"][spec] = {}
         for row in rows:
             m = mmap_plain if row == "plain" else mmap
             errs, reasons, t1 = [], {}, time.time()
             for qi, gi in enumerate(q_idx):
+                if qi == 25 and len(q_idx) > 200:
+                    eta = (time.time() - t1) / 25 * len(q_idx) / 60
+                    print(f"    [{row}] ~{eta:.0f} min for {len(q_idx)} queries", flush=True)
                 q_global = len(map_paths) + qi
 
                 def run_pass(anchors, q_global=q_global):

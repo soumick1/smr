@@ -420,8 +420,11 @@ def build_ui():
         with gr.Row():
             with gr.Column(scale=1):
                 img = gr.Image(type="pil", label="your photo (one image)")
-                backbone = gr.Radio(["vggt", "pi3"], value="vggt",
-                                    label="geometry backbone (the eyes)")
+                backbone = gr.Radio(["vggt", "vggt_omega", "pi3", "fast3r"],
+                                    value="vggt",
+                                    label="geometry backbone (the eyes)  "
+                                          "[vggt ~9 GB / vggt_omega ~6 GB / "
+                                          "pi3 ~10 GB / fast3r ~9 GB]")
                 az = gr.Slider(-150, 150, 60, step=5,
                                label="azimuth — orbit around the subject (°)")
                 el = gr.Slider(-40, 40, 8, step=2, label="elevation (°)")
