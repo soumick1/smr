@@ -494,16 +494,22 @@ class AnchoredStitcher:
             for g in list(overlap) + list(good_old):
                 by_owner.setdefault(owner[g], []).append(g)
             new_edges = []
+            overlap_set = set(overlap)
             for c, frames in by_owner.items():
                 if len(frames) < 2:
                     continue
                 Z, keep_e, info_e = self._fit(P[[pos[g] for g in frames]],
                                               np.stack([local[g] for g in frames]))
                 if info_e["scale_ok"]:
-                    kind = "seq" if c == k - 1 else "loop"
+                    # frames that arrived via the sequential overlap are a
+                    # sequential measurement whatever chunk owns them (with
+                    # overlap > chunk/2 the overlap spans two previous chunks);
+                    # only anchor-sourced frames make a loop edge
+                    kind = "seq" if all(g in overlap_set for g in frames) else "loop"
+                    ws = 1.0 if kind == "seq" else locals().get("loop_w_scale", 0.0)
                     new_edges.append(dict(c=int(c), k=int(k), Z=Z,
                                           n=int(keep_e.sum()), kind=kind,
-                                          w_scale=1.0 if kind == "seq" else loop_w_scale))
+                                          w_scale=ws))
             edges += new_edges
 
             # -- placement / correction

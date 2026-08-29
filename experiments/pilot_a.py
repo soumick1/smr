@@ -49,7 +49,7 @@ from smr.stitch import (AnchoredStitcher, BackboneRunner, DescriptorIndex,  # no
                         keyframe_indices, make_chunks, posegraph, probe,
                         stitch_chained)
 
-ROW_ORDER = ["chained", "smr", "smr_pgo", "smr_pgo_dense", "classical", "smr_jump", "plain"]
+ROW_ORDER = ["chained", "smr", "smr_pgo", "smr_pgo_wide", "smr_pgo_lba", "smr_pgo_dense", "classical", "smr_jump", "plain"]
 
 
 def load_inputs(a):
@@ -348,6 +348,72 @@ def main():
         if "smr_pgo" in want:
             t2 = time.time()
             pg, info = posegraph.solve(r, chunks, robust_reject=not a.no_robust_batch)
+            if "smr_pgo_wide" in want:
+                # re-measure every accepted loop edge with ONE wide joint pass
+                # (8+8 spatially closest frames of the two chunks, chosen from
+                # the current batch estimate) -- the loop-centric measurement,
+                # pose-level only, cached like every other pass
+                t5 = time.time()
+                from smr.stitch import sim3 as _s3
+                pg0, _ = posegraph.solve(r, chunks, robust_reject=not a.no_robust_batch)
+                wp = {g: pg0[g][:3, 3] for g in range(len(pg0))}
+                r_w = dict(r); r_w["edges"] = [dict(e) for e in r["edges"]]
+                n_rem = 0
+                own = r["owner"]
+                for e in r_w["edges"]:
+                    if e["kind"] != "loop":
+                        continue
+                    c1, c2 = int(e["c"]), int(e["k"])
+                    # only frames OWNED by the chunk: local[g] is the pose in
+                    # the owner's pass gauge, and the fit target must match it
+                    oc1 = [g for g in chunks[c1] if own[g] == c1]
+                    oc2 = [g for g in chunks[c2] if own[g] == c2]
+                    if len(oc1) < 4 or len(oc2) < 4:
+                        continue
+                    fc = sorted(oc1, key=lambda g: min(
+                        np.linalg.norm(wp[g] - wp[h]) for h in oc2))[:8]
+                    fk = sorted(oc2, key=lambda g: min(
+                        np.linalg.norm(wp[g] - wp[h]) for h in fc))[:8]
+                    P = cache.get([int(g) for g in fc + fk], runner)["poses"]
+                    Sc, kc, ic = _s3.fit_poses_robust(P[:len(fc)], np.stack([r["local"][g] for g in fc]), min_inliers=4)
+                    Sk, kk, ik = _s3.fit_poses_robust(P[len(fc):], np.stack([r["local"][g] for g in fk]), min_inliers=4)
+                    if not (ic.get("scale_ok", True) and ik.get("scale_ok", True)):
+                        continue
+                    e["Z"] = _s3.compose(Sc, _s3.inverse(Sk))
+                    e["w_scale"] = 1.0
+                    n_rem += 1
+                pgw, infow = posegraph.solve(r_w, chunks, robust_reject=not a.no_robust_batch)
+                add_row("smr_pgo_wide", pgw, r["passes"],
+                        dict(pgo_secs=round(time.time() - t5, 2), pgo_cost=infow["cost"],
+                             n_wide_loops=n_rem, n_dropped_edges=infow.get("n_dropped", 0),
+                             **loops_of(r)))
+            if "smr_pgo_lba" in want:
+                t4 = time.time()
+                from smr.stitch import sim3 as _s3
+                extra = []
+                key_of = {tuple(ch): ci for ci, ch in enumerate(chunks)}
+                for c1 in range(len(chunks)):
+                    for c2 in range(c1 + 2, min(c1 + 5, len(chunks))):
+                        shared = [g for g in chunks[c2] if g in set(chunks[c1])]
+                        if len(shared) < 6:
+                            continue
+                        P1 = cache.data.get(cache.key(chunks[c1]))
+                        P2 = cache.data.get(cache.key(chunks[c2]))
+                        if P1 is None or P2 is None:
+                            continue
+                        A = np.stack([P2["poses"][chunks[c2].index(g)] for g in shared])
+                        B = np.stack([P1["poses"][chunks[c1].index(g)] for g in shared])
+                        S_sk, keep_sk, info_sk = _s3.fit_poses_robust(A, B, min_inliers=4)
+                        extra.append(dict(c=c1, k=c2, Z=S_sk, w_scale=0.0, kind="seq"))
+                if extra:
+                    r_lba = dict(r); r_lba["edges"] = list(r["edges"]) + extra
+                    pgl, infol = posegraph.solve(r_lba, chunks, robust_reject=not a.no_robust_batch)
+                    add_row("smr_pgo_lba", pgl, r["passes"],
+                            dict(pgo_secs=round(time.time() - t4, 2), pgo_cost=infol["cost"],
+                                 n_skip_edges=len(extra), n_dropped_edges=infol.get("n_dropped", 0),
+                                 **loops_of(r)))
+                else:
+                    print("    [smr_pgo_lba] no skip overlaps at this chunk/overlap; row skipped")
             if "smr_pgo_dense" in want and a.backbone != "synthetic":
                 from smr.backbones import get_backbone
                 from smr.stitch import dense_edges
