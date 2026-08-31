@@ -53,3 +53,21 @@ def test_consensus_is_noop_for_deterministic_backbone():
     fused, _ = consensus_poses(passes, n)
     rf, tf = pairwise_errors(fused, gt)
     assert auc_at(rf, tf) > 0.999                 # permutation-equivariant case: no harm
+
+
+def test_pairwise_median_survives_bad_reference_passes():
+    """Half the passes are globally poor (bad reference frame); per-pair
+    medians must track the clean regime, where global averaging degrades."""
+    from smr.stitch.consensus_pose import pairwise_median_errors
+    rng = np.random.default_rng(2)
+    n = 10
+    for trial in range(4):
+        gt = _random_poses(rng, n)
+        passes = []
+        for k in range(8):
+            sig = 2.0 if k % 2 == 0 else 10.0          # alternating good/bad passes
+            ids = list(rng.permutation(n)) if k else list(range(n))
+            passes.append((ids, _noisy_pass(rng, gt, ids, sig, 0.02 * sig, rng.uniform(0.5, 2))))
+        r1, t1 = pairwise_errors(passes[0][1], gt)      # the single clean pass
+        rm, tm = pairwise_median_errors(passes, gt)
+        assert auc_at(rm, tm) >= auc_at(r1, t1) - 0.02  # never meaningfully worse than single

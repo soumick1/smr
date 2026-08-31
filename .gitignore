@@ -1,5 +1,5 @@
 .venv/
-outputs/
+outputs2/
 __pycache__/
 third_party/
 *.egg-info/
@@ -12,3 +12,4 @@ data/
 videos/
 orbit_frames/
 co3d/
+outputs/

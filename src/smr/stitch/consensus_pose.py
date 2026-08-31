@@ -101,3 +101,64 @@ def _robust_pose_mean(Ts):
     R = U @ np.diag([1, 1, np.sign(np.linalg.det(U @ Vt))]) @ Vt
     out = np.eye(4); out[:3, :3] = R; out[:3, 3] = t
     return out
+
+
+def pairwise_median_errors(passes, gt):
+    """Per-pair robust consensus: each pass containing frames (i, j) casts one
+    vote for their relative pose; the chordal-median rotation and the median
+    translation direction are scored against GT.  No global alignment, so a
+    bad-reference pass cannot poison pairs it estimates well, and pairs it
+    estimates badly are outvoted.  Returns (rot_errs, trn_errs) over pairs."""
+    n = len(gt)
+    where = []
+    for ids, P in passes:
+        where.append({g: k for k, g in enumerate(ids)})
+    rot, trn = [], []
+    for i in range(n):
+        for j in range(i + 1, n):
+            Rs, ts = [], []
+            for (ids, P), pos in zip(passes, where):
+                if i not in pos or j not in pos:
+                    continue
+                Rs.append(P[pos[j]][:3, :3].T @ P[pos[i]][:3, :3])
+                tv = P[pos[j]][:3, :3].T @ (P[pos[i]][:3, 3] - P[pos[j]][:3, 3])
+                nv = np.linalg.norm(tv)
+                if nv > 1e-9:
+                    ts.append(tv / nv)
+            if not Rs:
+                continue
+            R = _chordal_median(Rs)
+            tm = _direction_median(ts) if ts else np.zeros(3)
+            Rg = gt[j][:3, :3].T @ gt[i][:3, :3]
+            tg = gt[j][:3, :3].T @ (gt[i][:3, 3] - gt[j][:3, 3])
+            rot.append(relative_rotation_deg(Rg, R))
+            trn.append(translation_angle_deg(tg, tm))
+    return np.array(rot), np.array(trn)
+
+
+def _chordal_median(Rs, iters=3):
+    Rs = np.stack(Rs)
+    w = np.ones(len(Rs))
+    R = None
+    for _ in range(iters):
+        M = (Rs * w[:, None, None]).sum(0)
+        U, _, Vt = np.linalg.svd(M)
+        R = U @ np.diag([1, 1, np.sign(np.linalg.det(U @ Vt))]) @ Vt
+        ang = np.array([relative_rotation_deg(R, Ri) for Ri in Rs])
+        w = 1.0 / np.maximum(ang, 2.0)
+    return R
+
+
+def _direction_median(ts, iters=3):
+    ts = np.stack(ts)
+    w = np.ones(len(ts))
+    v = ts.mean(0)
+    for _ in range(iters):
+        v = (ts * w[:, None]).sum(0)
+        nv = np.linalg.norm(v)
+        if nv < 1e-9:
+            return ts[0]
+        v = v / nv
+        ang = np.degrees(np.arccos(np.clip(ts @ v, -1, 1)))
+        w = 1.0 / np.maximum(ang, 2.0)
+    return v
