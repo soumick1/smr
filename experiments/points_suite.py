@@ -101,11 +101,22 @@ def synthetic(seed=0, n_ctx=5, n_pts=4000, bias=0.02, noise=0.01, outlier=0.08):
     print("SYNTHETIC PROOF PASSED: fused Overall < single Overall")
 
 # ------------------------------------------------------------------- real ---
-def unproject(depth, K, c2w, stride=2):
+def conf_mask(o, j, pct):
+    c = o.extras.get("conf") if hasattr(o, "extras") else None
+    if pct is None or c is None:
+        if pct is not None and c is None:
+            print("  [warn] --conf-pct set but backbone exposes no conf; keeping all")
+        return None
+    cj = np.asarray(c[j], dtype=np.float32)
+    return cj >= np.percentile(cj[np.isfinite(cj)], pct)
+
+def unproject(depth, K, c2w, stride=2, mask=None):
     H, W = depth.shape
     ys, xs = np.mgrid[0:H:stride, 0:W:stride]
     z = depth[ys, xs]
     ok = np.isfinite(z) & (z > 0)
+    if mask is not None:
+        ok &= mask[ys, xs]
     pix = np.stack([xs, ys, np.ones_like(xs)], -1).reshape(-1, 3).astype(float)
     rays = (np.linalg.inv(K) @ pix.T).T
     pts_c = rays * z.reshape(-1, 1)
@@ -116,6 +127,12 @@ def unproject(depth, K, c2w, stride=2):
 def real(a):
     from smr.backbones import get_backbone
     d = np.load(a.gt, allow_pickle=True)
+    if a.n_views and a.n_views < len(d["image_paths"]):
+        rng = np.random.RandomState(a.view_seed)
+        keep = np.sort(rng.choice(len(d["image_paths"]), a.n_views, replace=False))
+        d = {k: (np.asarray(d[k])[keep] if k in ("image_paths", "poses", "K") else d[k])
+             for k in d.files}
+        print(f"protocol subsample: {a.n_views} views (seed {a.view_seed}): {list(keep)}")
     paths = [str(p) for p in d["image_paths"]]
     V = len(paths)
     bb = get_backbone(a.backbone)
@@ -154,7 +171,8 @@ def real(a):
         pts = {}
         for j, v in enumerate(ids):
             K = o.extras["intrinsics_all"][j]
-            P = unproject(o.depth[j], K, o.poses[j], a.stride)
+            P = unproject(o.depth[j], K, o.poses[j], a.stride,
+                          mask=conf_mask(o, j, a.conf_pct))
             Ph = (T[k][:3, :3] @ P.T).T + T[k][:3, 3]
             pts[v] = Ph
         ctx_pts.append(pts)
@@ -181,7 +199,8 @@ def real(a):
                 Hd, Wd = o.depth[j].shape
                 Kv = Ks_gt[v].copy()
                 Kv[0] *= Wd / W0; Kv[1] *= Hd / H0   # K at depth-map resolution
-                pts[v] = unproject(o.depth[j] * sc, Kv, gt_poses[v], a.stride)
+                pts[v] = unproject(o.depth[j] * sc, Kv, gt_poses[v], a.stride,
+                                   mask=conf_mask(o, j, a.conf_pct))
             ctx_pts.append(pts)
         print(f"gt-cams mode: metric depth scale per ctx = chain x {sG:.2f}")
     else:
@@ -218,6 +237,10 @@ if __name__ == "__main__":
     ap.add_argument("--gt-cams", action="store_true",
                     help="unproject with provided cameras (DTU protocol); depth remains the estimand")
     ap.add_argument("--strict", action="store_true", help="drop sole-witness views (old behavior)")
+    ap.add_argument("--n-views", type=int, default=0, help="protocol subsample (e.g. 10 for VGGT ETH3D)")
+    ap.add_argument("--view-seed", type=int, default=0)
+    ap.add_argument("--conf-pct", type=float, default=None,
+                    help="keep pixels with confidence >= this percentile (e.g. 50)")
     ap.add_argument("--stride", type=int, default=2); ap.add_argument("--out-dir", default="outputs/points/run")
     a = ap.parse_args()
     synthetic() if a.synthetic else real(a)

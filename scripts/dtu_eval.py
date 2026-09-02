@@ -32,6 +32,7 @@ ap.add_argument("--pred", required=True); ap.add_argument("--scan", type=int, re
 ap.add_argument("--sampleset", required=True); ap.add_argument("--max-dist", type=float, default=20.0)
 ap.add_argument("--points-dir", default=None, help="dir with stlXXX_total.ply (Points.zip)")
 ap.add_argument("--down", type=float, default=0.2, help="pred downsample voxel (mm); 0=off")
+ap.add_argument("--icp", type=int, default=0, help="Sim(3) ICP refinement iterations (0=off)")
 a = ap.parse_args()
 ss = pathlib.Path(a.sampleset)
 stl = (pathlib.Path(a.points_dir) if a.points_dir else ss / "Points" / "stl")
@@ -45,6 +46,29 @@ pred = read_ply(a.pred)
 if a.down > 0:                                     # voxel thin (official uses 0.2mm reduce)
     key = np.floor(pred / a.down).astype(np.int64)
     _, keep = np.unique(key, axis=0, return_index=True); pred = pred[keep]
+if a.icp > 0:
+    # Sim(3) point-to-point ICP refinement of pred onto GT (DUSt3R-lineage
+    # evals refine the gauge cloud-to-cloud; ours arrives from a camera fit).
+    rng = np.random.RandomState(0)
+    Gs = gt[rng.choice(len(gt), min(len(gt), 200_000), replace=False)]
+    tree = cKDTree(Gs)
+    P = pred[rng.choice(len(pred), min(len(pred), 60_000), replace=False)].copy()
+    T_s, T_R, T_t = 1.0, np.eye(3), np.zeros(3)
+    for it in range(a.icp):
+        d_nn, idx = tree.query(P, workers=-1)
+        keep_nn = d_nn < np.percentile(d_nn, 80)
+        A, B = P[keep_nn], Gs[idx[keep_nn]]
+        muA, muB = A.mean(0), B.mean(0)
+        A0, B0 = A - muA, B - muB
+        U, S, Vt = np.linalg.svd(A0.T @ B0)
+        D = np.eye(3); D[2, 2] = np.sign(np.linalg.det(Vt.T @ U.T))
+        R = Vt.T @ D @ U.T
+        s = (S * np.diag(D)).sum() / (A0 ** 2).sum()
+        tvec = muB - s * (R @ muA)
+        P = (s * (R @ P.T)).T + tvec
+        T_R = R @ T_R; T_s = s * T_s; T_t = s * (R @ T_t) + tvec
+    pred = (T_s * (T_R @ pred.T)).T + T_t
+    print(f"icp({a.icp}): scale {T_s:.5f}  |t| {np.linalg.norm(T_t):.3f} mm")
 # Accuracy: pred filtered by BB + ObsMask grid, distances to GT, discard >MaxDist
 g = np.floor((pred - BB[0:1]) / Res).astype(int)
 inbb = ((pred >= BB[0:1]) & (pred < BB[1:2])).all(1)
