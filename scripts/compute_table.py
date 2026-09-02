@@ -31,8 +31,12 @@ BBS = ["dust3r", "fast3r", "mast3r", "vggt", "vggt_omega", "pi3", "streamvggt", 
 def harvest(bb, S=None):
     S = S or globals()["S"]
     rows = {"chained": [], "smr": [], "smr_pgo": []}
-    for f in glob.glob(f"{a.reports_dir}/t1*_{bb}_s{S}.json") + \
-             glob.glob(f"{a.reports_dir}/t1b_*_{bb}.json" if S == "1" else "/nonexistent"):
+    extra = []
+    if S == "1":
+        extra += glob.glob(f"{a.reports_dir}/t1b_*_{bb}.json")
+        if bb == "vggt_omega":                       # v99 rerun naming
+            extra += glob.glob(f"{a.reports_dir}/t1b_*_omega_v99.json")
+    for f in glob.glob(f"{a.reports_dir}/t1*_{bb}_s{S}.json") + extra:
         try: rep = json.load(open(f))
         except Exception: continue
         for r in rep.get("rows", []):
@@ -92,7 +96,8 @@ for bb in BBS:
     cells = ""
     for n in ns_all:
         nat = probe.get((bb, n))
-        nc = ("OOM" if nat and nat["status"] == "OOM"
+        nc = ("n/f" if nat and str(nat["status"]).startswith("infeasible")
+              else "OOM" if nat and nat["status"] == "OOM"
               else c(nat and nat.get("gpu_peak_gb"), "{:.1f}"))
         _, smr_r, _ = harvest(bb, NS[n])
         sc = c(smr_r and smr_r["gpu"], "{:.1f}")

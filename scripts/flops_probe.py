@@ -35,6 +35,7 @@ def main():
     ap.add_argument("--n-list", default="10,32,36,50,100,200")
     ap.add_argument("--json", required=True)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--redo", action="store_true", help="ignore existing json")
     a = ap.parse_args()
 
     import torch
@@ -47,7 +48,19 @@ def main():
     ns = [int(x) for x in a.n_list.split(",")]
     assert len(paths) >= max(ns), f"npz has {len(paths)} frames < max N {max(ns)}"
 
-    out = {"gt": a.gt, "device": torch.cuda.get_device_name(0) if a.device == "cuda" else "cpu",
+    import os
+    PAIR_CAP = {"dust3r": 50, "mast3r": 50}      # pairwise GA: host-RAM/time wall
+    done = set()
+    if os.path.exists(a.json) and not a.redo:
+        try:
+            prev = json.load(open(a.json))
+            done = {(r["backbone"], r.get("N")) for r in prev.get("rows", [])}
+            print(f"resume: {len(done)} rows already measured")
+        except Exception:
+            prev = None
+    else:
+        prev = None
+    out = prev if prev else {"gt": a.gt, "device": torch.cuda.get_device_name(0) if a.device == "cuda" else "cpu",
            "rows": []}
     for name in a.backbones.split(","):
         name = name.strip()
@@ -60,7 +73,16 @@ def main():
         except Exception as e:                                   # noqa: BLE001
             out["rows"].append(dict(backbone=name, status=f"error:warmup:{e}")); continue
         for N in ns:
+            if (name, N) in done:
+                continue
             row = dict(backbone=name, N=N)
+            if N > PAIR_CAP.get(name, 10**9):
+                row["status"] = f"infeasible:pairwise-GA@N{N}"
+                out["rows"].append(row)
+                tmp = a.json + ".tmp"
+                json.dump(out, open(tmp, "w"), indent=1); os.replace(tmp, a.json)
+                print(f"{name:<12} N={N:<4} infeasible (pairwise GA host-RAM/time)")
+                continue
             torch.cuda.empty_cache(); torch.cuda.reset_peak_memory_stats()
             r0, t0, c0 = rss_gb(), time.time(), time.process_time()
             try:
@@ -107,6 +129,8 @@ def main():
                 row.update(status=f"error:{type(e).__name__}:{str(e)[:80]}")
                 torch.cuda.empty_cache()
             out["rows"].append(row)
+            tmp = a.json + ".tmp"
+            json.dump(out, open(tmp, "w"), indent=1); os.replace(tmp, a.json)
             def _f(k, w):
                 v = row.get(k)
                 return f"{v:>{w}}" if isinstance(v, (int, float)) else f"{'-':>{w}}"
@@ -114,7 +138,6 @@ def main():
                   f"{_f('gflops',10)} GF  {_f('gpu_peak_gb',6)} GB  {_f('wall_s',7)} s"
                   + (f"  [{row['flops_note']}]" if row.get('flops_note') else ""))
         del bb; torch.cuda.empty_cache()
-    json.dump(out, open(a.json, "w"), indent=1)
     print("->", a.json)
 
 if __name__ == "__main__":
