@@ -199,6 +199,7 @@ def main():
     ap.add_argument("--cache", default="",
                     help="pass cache (.npy); reruns never re-infer a pass")
     ap.add_argument("--json", default="")
+    ap.add_argument("--save-est", default="", help="npz to store per-row trajectories + chunks for points_suite --pilot")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--verbose", action="store_true")
     # harness validation only
@@ -297,7 +298,10 @@ def main():
     rpe_dist = a.rpe_dist if meta["metric"] else None
     rows, results = [], {}
 
+    ests = {}                                  # v123: per-row trajectories for --save-est
+
     def add_row(name, est, passes, extra):
+        ests[name] = np.asarray(est, float)
         # AUC split by CHUNK WINDOW for every row (identical pair sets, so
         # AUCin is the pass-through monitor); the split by pass is kept in
         # the JSON as auc_within_pass / auc_cross_pass.
@@ -488,6 +492,21 @@ def main():
     report["events"] = {k: v["events"] for k, v in results.items()}
     report["elapsed_secs"] = round(time.time() - t0, 1)
     _write(report, a, simulated, meta)
+    if a.save_est:
+        # v123: the rows' trajectories (row global frame, one c2w per keyframe),
+        # the keyframe indices into the GT npz, the chunk windows and the image
+        # paths -- everything experiments/points_suite.py --pilot needs to
+        # place the SAME backbone passes under each row's junctions.
+        out = pathlib.Path(a.save_est)
+        if not out.is_absolute():
+            out = ROOT / out
+        out.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(out, gt=str(a.gt), backbone=a.backbone, key=np.asarray(key, int),
+                            chunks=np.array([np.asarray(c, int) for c in chunks], dtype=object),
+                            kpaths=np.array(kpaths if paths is not None else [], dtype=object),
+                            rows=np.array(list(ests.keys()), dtype=object),
+                            **{f"est_{k}": v for k, v in ests.items()})
+        print(f"row trajectories -> {out}  rows={list(ests.keys())}")
 
 
 def _write(report, a, simulated, meta):

@@ -110,8 +110,16 @@ class VGGTBackbone(Backbone):
             except Exception as e:                       # fail LOUD, not wrong
                 print(f"  [WARN] feature extraction failed ({e}); "
                       f"falling back to pooled-RGB descriptor")
+        extras = dict(conf=conf, scene_scale=s, intrinsics_all=intri)
+        # v122: point-map head (VGGT Table 3 "Ours (Point)"), expressed in the
+        # same first-camera frame as the extrinsics and divided by the same
+        # scene scale as depth/poses so the three stay mutually consistent.
+        # VERIFY-ON-SERVER: keys per the official README ("world_points",
+        # "world_points_conf"); absent keys are skipped, never invented.
+        if isinstance(pred, dict) and "world_points" in pred:
+            extras["world_points"] = (pred["world_points"].squeeze(0).float().cpu().numpy() / s)
+            if "world_points_conf" in pred:
+                extras["world_points_conf"] = pred["world_points_conf"].squeeze(0).float().cpu().numpy()
         return BackboneOutput(poses=poses, intrinsics=intri[0],
                               depth=depth, rgb=np.clip(rgb, 0, 1),
-                              mask=mask, features=feats,
-                              extras=dict(conf=conf, scene_scale=s,
-                                          intrinsics_all=intri))
+                              mask=mask, features=feats, extras=extras)
