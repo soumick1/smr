@@ -90,6 +90,8 @@ class GT:
             Q = self.Gs[nn] - self.Gs[nn].mean(1, keepdims=True)
             self.N = np.linalg.eigh(np.einsum("nki,nkj->nij", Q, Q))[1][:, :, 0]
         self.above = self.gt @ self.pl[:3] + self.pl[3] > 0
+        ga = self.gt[self.above]
+        self.gt_sub_above = ga[np.random.RandomState(2).choice(len(ga), min(len(ga), 50_000), replace=False)]
 
     def in_region(self, P):
         """Official evaluation region: inside the BB and inside the ObsMask grid."""
@@ -98,13 +100,20 @@ class GT:
         gi = np.clip(g, 0, np.array(self.mask.shape) - 1)
         return ok & self.mask[gi[:, 0], gi[:, 1], gi[:, 2]].astype(bool)
 
-    def fit_quality(self, P):
-        """Median NN distance (mm) of in-region points to the scan: the gauge's figure of merit."""
+    def fit_quality(self, P, max_dist=20.0):
+        """Figure of merit of an alignment: the truncated Chamfer mean on subsamples -- the mean NN
+        distance of in-region prediction points to the scan plus the mean NN distance of scan
+        points (above the plane) to the prediction, both with the protocol's MaxDist cut.  This is
+        the objective the gauge should minimise; medians (v134-v136) let a shrunk or slid cloud
+        that overlaps the densest part of the object win with a wrong shape."""
         reg = self.in_region(P)
         if reg.sum() < 2000:
             return np.inf
-        sub = P[reg][np.random.RandomState(1).choice(reg.sum(), min(reg.sum(), 50_000), replace=False)]
-        return float(np.median(self.tree.query(sub, workers=-1)[0]))
+        rs = np.random.RandomState(1)
+        sub = P[reg][rs.choice(reg.sum(), min(reg.sum(), 50_000), replace=False)]
+        d_pg = self.tree.query(sub, workers=-1)[0]
+        d_gp = cKDTree(P[reg]).query(self.gt_sub_above, workers=-1)[0]
+        return float(0.5 * (np.minimum(d_pg, max_dist).mean() + np.minimum(d_gp, max_dist).mean()))
 
 
 def run_icp(pred0, coarse, G, a):
@@ -112,13 +121,32 @@ def run_icp(pred0, coarse, G, a):
     rng = np.random.RandomState(0)
     pred = pred0.copy()
     init_shift = np.zeros(3)
-    if coarse:                                                  # robust centroid initialisation
-        margin = 50.0
-        inb = ((pred >= G.BB[0:1] - margin) & (pred < G.BB[1:2] + margin)).all(1)
-        inb &= (pred @ G.pl[:3] + G.pl[3]) > 0                   # above the ground plane: no table
-        if inb.sum() >= 5000:
-            init_shift = np.median(G.gt, 0) - np.median(pred[inb], 0)
-            pred = pred + init_shift
+    init_scale = 1.0
+    if coarse:
+        # Robust similarity initialisation that makes no assumption about where the cloud
+        # arrived: (1) match the median of ALL prediction points to the scan's median
+        # (translation only -- the table would bias a scale from all points); (2) with the
+        # support shrunk to prediction points within 60 mm, then 40 mm, of the scan, match
+        # medians and the median radial extents (a robust scale).  Composition tracked so
+        # the total similarity is reported and capped like any other refinement.
+        mg = np.median(G.gt_sub_above, 0); eg = np.median(np.linalg.norm(G.gt_sub_above - mg, axis=1))
+        S, Tt = 1.0, np.zeros(3)
+        sub0 = pred[rng.choice(len(pred), min(len(pred), 100_000), replace=False)]
+        cur = sub0.copy()
+        for cap in (None, 60.0, 40.0):
+            if cap is None:
+                sel = np.ones(len(cur), bool); s_step = 1.0
+            else:
+                sel = G.tree.query(cur, workers=-1)[0] < cap
+                if sel.sum() < 2000:
+                    break
+                ep = np.median(np.linalg.norm(cur[sel] - np.median(cur[sel], 0), axis=1))
+                s_step = float(np.clip(eg / max(ep, 1e-9), 0.25, 4.0))
+            mp = np.median(cur[sel], 0)
+            cur = mg + s_step * (cur - mp)                     # new = s*old + (mg - s*mp)
+            S *= s_step; Tt = s_step * Tt + (mg - s_step * mp)
+        pred = S * pred + Tt
+        init_scale, init_shift = S, Tt
     region = G.in_region(pred)
     cand = pred[region] if region.sum() >= 5000 else pred
     P = cand[rng.choice(len(cand), min(len(cand), 60_000), replace=False)].copy()
@@ -158,12 +186,12 @@ def run_icp(pred0, coarse, G, a):
         if step < a.icp_tol:
             break
     moved = np.linalg.norm((T_s * (T_R @ cand[:2000].T)).T + T_t - cand[:2000], axis=1).mean()
-    if abs(np.log(T_s)) > a.icp_max_scale or moved > a.icp_max_move:
-        return None, f"scale {T_s:.4f}, mean move {moved:.1f} mm"
+    if abs(np.log(T_s * init_scale)) > a.icp_max_scale or moved > a.icp_max_move:
+        return None, f"scale {T_s * init_scale:.4f}, mean move {moved:.1f} mm"
     out = (T_s * (T_R @ pred.T)).T + T_t
-    info = (f"icp({it + 1}/{a.icp},{a.icp_mode}{',coarse' if coarse else ''}): scale {T_s:.5f}  "
-            f"|t| {np.linalg.norm(T_t + init_shift):.3f} mm  (mean move {moved:.2f} mm, init shift "
-            f"{np.linalg.norm(init_shift):.1f} mm, {region.mean() * 100:.0f}% of pred in region)")
+    info = (f"icp({it + 1}/{a.icp},{a.icp_mode}{',coarse' if coarse else ''}): scale {T_s * init_scale:.5f}  "
+            f"|t| {np.linalg.norm(T_t + init_shift):.3f} mm  (mean move {moved:.2f} mm, init scale "
+            f"{init_scale:.3f} shift {np.linalg.norm(init_shift):.1f} mm, {region.mean() * 100:.0f}% of pred in region)")
     return out, info
 
 
@@ -208,8 +236,9 @@ def main():
     ap.add_argument("--icp-tol", type=float, default=0.005, help="stop when the mean per-iteration move is below this (mm)")
     ap.add_argument("--icp-init", choices=["auto", "none"], default="auto",
                     help="auto: also try a coarse centroid initialisation; the candidate with the best fit wins")
-    ap.add_argument("--icp-max-scale", type=float, default=0.05)
-    ap.add_argument("--icp-max-move", type=float, default=30.0)
+    ap.add_argument("--icp-max-scale", type=float, default=0.5,
+                    help="sanity cap on |log scale| of a refinement (fit quality decides; v134's 0.05 refused legitimate 10-25%% corrections)")
+    ap.add_argument("--icp-max-move", type=float, default=300.0, help="sanity cap on the mean move (mm)")
     a = ap.parse_args()
     if a.tags is not None and len(a.tags) != len(a.pred):
         raise SystemExit("--tags must have one entry per --pred")

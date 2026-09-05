@@ -57,6 +57,8 @@ for l in lines[start:]:
         kind = "win_smr" if stream else "smr"
     else:
         kind = "unknown"
+    if bb == "vggt_omega" and kind in ("raw", "native"):
+        label = label + r"$^{\S}$"                    # released checkpoint: possible benchmark contamination (authors' README)
     rows.append(("data", dict(label=label, bb=bb, kind=kind, cam=cam)))
 
 # --------------------------------------------------------------- dense cells ---
@@ -151,30 +153,36 @@ caption = r"""Camera pose, dense MVS and point maps for every backbone, raw and 
 windows; +\smr{} = causal scaffold memory; +\smr{}+PGO adds the final robust solve. At $N{=}10$
 (one window) and, on these data, $N{=}50$ (no revisits yet) the three rows are identical --- the
 floor of Sec.~\ref{sec:correct}, measured. $^{\dagger}$DUSt3R/MASt3R length axis on a stated
-10-sequence CO3D subset (pairwise-alignment runtime); their RE10K length cells (10-clip subset)
-are a 10-clip subset$^{\ddagger}$. Native and $^{\ddagger}$ windowed cells at $N{=}10$ differ
-only by sample (100 vs.\ 10 clips). OOM = exceeds a 46\,GB GPU. RE10K frames are uniform
-$\le$480p re-extractions shared by all rows.
+10-sequence CO3D subset (pairwise-alignment runtime); their RE10K length cells are a 10-clip
+subset$^{\ddagger}$. Native and $^{\ddagger}$ windowed cells at $N{=}10$ differ only by sample
+(100 vs.\ 10 clips). OOM = exceeds a 46\,GB GPU. RE10K frames are uniform $\le$480p
+re-extractions shared by all rows.
 \textbf{Dense MVS} (DTU, 22 standard scans, all 49 views, Chamfer mm$\downarrow$) and
 \textbf{point maps} (ETH3D, 13 scenes, ten frames, official rendered depth and masks,
-Umeyama on per-pixel correspondences, Chamfer m$\downarrow$): one harness for every row
-(official DTU evaluator with masks and 0.2\,mm downsampling; gauge = converged point-to-plane
-Sim(3) refinement onto the scan; each backbone's native point map --- its point head where it
-has one, depth $\times$ camera otherwise --- with confidence $>2$, or the top 68\% for
-sigmoid confidences). Both benchmarks fit one window, so raw is the backbone's single pass
-and +\smr{} is the memory's in-window read: four orderings of the same views written to one
-scaffold, symmetric re-measure of per-pass scale, consensus (median on DTU, corroborated
-pixels only on ETH3D). There is no junction graph inside one window, so +\smr{}+PGO equals
-+\smr{}; and for order-invariant backbones (DUSt3R, MASt3R: pairwise + global alignment;
-$\pi^3$: permutation-equivariant) the read is the identity, so +\smr{} equals raw. Streaming
-backbones: native = one causal pass; windowed rows use 16-view windows fused by their median,
-+\smr{} adds the content re-measure. Published anchors under the authors' own protocols:
-VGGT DTU 0.389/0.374/0.382 (not reproduced feed-forward by an independent study
-\citep{langendoerfer2026vggt} nor by us), ETH3D 0.873/0.482/0.677. Superscripts on Overall
-give the number of scans/scenes when a row is incomplete.
+Umeyama on per-pixel correspondences, Chamfer m$\downarrow$): one harness for every row.
+Official DTU evaluator (masks, 0.2\,mm downsampling); gauge = Sim(3) refinement onto the scan,
+chosen by a symmetric fit criterion among the camera alignment, a region-restricted
+point-to-plane ICP, and the same from a robust similarity initialisation. Each backbone
+contributes its native point map (point head where it has one, depth $\times$ camera
+otherwise) with confidence $>2$ (top 68\% for sigmoid confidences). Both benchmarks fit one
+window: raw is the single pass; +\smr{} is the memory's in-window read --- four orderings of the
+same views written to one scaffold, symmetric re-measure of per-pass scale, consensus (median
+on DTU, corroborated pixels only on ETH3D). No junction graph exists inside one window, so
++\smr{}+PGO equals +\smr{}. The read is the identity for order-invariant backbones (DUSt3R and
+MASt3R: pairwise + global alignment; $\pi^3$: permutation-equivariant), and it presupposes
+commensurable passes: for Fast3R and the causal StreamVGGT/STream3R, orderings yield
+different reconstructions and the corroborated read keeps too little (ETH3D). DUSt3R on DTU
+uses a sliding-window pair graph (window 5); its complete graph over 49 views exceeds 46\,GB.
+$^{\S}$The VGGT-$\Omega$ authors report possible benchmark contamination of the released
+checkpoint; ETH3D's training scenes are this benchmark. Streaming backbones: native = one causal
+pass; windowed rows use 16-view windows fused by their median, +\smr{} adds the content
+re-measure. Published anchors under the authors' own protocols: VGGT DTU 0.389/0.374/0.382
+(not reproduced feed-forward by \citet{langendoerfer2026vggt} nor by us), ETH3D 0.873/0.482/0.677.
+Superscripts on Overall give the number of scans/scenes when a row is incomplete.
 """
 
-head = r"""\begin{table}[t]
+import datetime as _dt
+head = f"% built {_dt.datetime.now():%Y-%m-%d %H:%M} by scripts/build_main_table.py from {a.matrix}\n" + r"""\begin{table}[t]
 \centering\scriptsize
 \setlength{\tabcolsep}{2.4pt}
 \caption{""" + caption.strip() + r"""}

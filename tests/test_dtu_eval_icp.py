@@ -84,7 +84,36 @@ def test_far_start_is_recovered_or_rejected():
         cmd = [sys.executable, str(ROOT / "scripts" / "dtu_eval.py"), "--pred", str(pathlib.Path(tmp) / "pred.ply"), "--scan", "1",
                "--sampleset", str(pathlib.Path(tmp) / "ss"), "--points-dir", str(pathlib.Path(tmp) / "stl"), "--icp", "50", "--down", "0", "--icp-init", "none"]
         r = subprocess.run(cmd, capture_output=True, text=True); print(r.stdout.strip())
-        assert "REJECTED" in r.stdout
+        # without the coarse candidate an 80 mm start is never "fixed" by a runaway: either refused or left alone
+        assert "REJECTED" in r.stdout or "keeping camera alignment" in r.stdout
+        assert parse(r.stdout)[0] > 5.0
+
+
+def test_large_scale_mismatch_is_recovered():
+    """DUSt3R-like case: the cloud arrives 25 % too large and 40 mm off (point-vs-camera scale
+    mismatch).  v134 refused this (5 % cap); the robust similarity initialisation + fit-quality
+    selection must bring it to the noise floor."""
+    with tempfile.TemporaryDirectory() as tmp:
+        make_scan(tmp, shift_mm=40.0, scale=1.25)
+        out = run_eval(pathlib.Path(tmp), icp=50); print(out.strip())
+        assert "REJECTED" not in out.split("scan1: Acc")[0] or "coarse" in out
+        assert parse(out)[0] < 0.45, parse(out)
+
+
+def test_fit_quality_is_symmetric():
+    """A prediction slid 30 mm along the surface must score worse than the true alignment."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("de", ROOT / "scripts" / "dtu_eval.py"); de = importlib.util.module_from_spec(spec); spec.loader.exec_module(de)
+    with tempfile.TemporaryDirectory() as tmp:
+        make_scan(tmp, shift_mm=0.0, scale=1.0); tmp = pathlib.Path(tmp)
+        G = de.GT(1, tmp / "ss", tmp / "stl", "plane")
+        P = de.read_ply(tmp / "pred.ply")
+        good = G.fit_quality(P); slid = G.fit_quality(P + np.array([30.0, 0.0, 0.0]))
+        # the scan13 failure mode: a cloud shrunk by 23 % about the object centre (and nudged 5 mm)
+        c = np.median(P[G.in_region(P)], 0)
+        shrunk = G.fit_quality(c + 0.77 * (P - c) + np.array([0.0, 0.0, 5.0]))
+        print(f"fit true {good:.2f} mm, slid 30 mm {slid:.2f} mm, shrunk 23% {shrunk:.2f} mm")
+        assert good < 0.5 * slid and good < 0.5 * shrunk, (good, slid, shrunk)
 
 
 def write_ply_binary(path, P):
@@ -122,5 +151,7 @@ def test_multi_pred_tags_binary_and_equivalence():
 if __name__ == "__main__":
     test_background_does_not_capture_icp()
     test_far_start_is_recovered_or_rejected()
+    test_large_scale_mismatch_is_recovered()
+    test_fit_quality_is_symmetric()
     test_multi_pred_tags_binary_and_equivalence()
     print("dtu_eval icp tests passed")

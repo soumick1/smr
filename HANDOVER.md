@@ -1,4 +1,4 @@
-# SMR HANDOVER MANIFEST — VGGT Table 2/3 reproduction chase (2026-09-05, v135)
+# SMR HANDOVER MANIFEST — VGGT Table 2/3 reproduction chase (2026-09-05, v141)
 Read this fully before acting. Rules that are LAW in this project:
 code > Overleaf > memory; every patch VERIFIES its landing (assert/grep) before packaging;
 predictions recorded BEFORE runs and scored honestly (current scoreboard 3.0/10);
@@ -42,7 +42,15 @@ If needed read the ENTIRE paper incl. supplementary for eval details.
 - v133 Overleaf zip had STAND-IN StreamVGGT windowed cells -> discarded; v134 zip is real-only.
 - MATRIX RUN DONE (Sep 5): all backbones complete; DUSt3R DTU = OOM on 22/22 (complete pair graph). v135 adds
   --backbone-kw + a dust3r memory ladder (swin-5 -> swin-3); rerun block in UPDATE_NOTES_v135.md §3.
-  Result files (matrix/*.log, *.jsonl) not yet received -> table not yet scored.
+  Results received (v134 gauge): DTU column INVALID for non-VGGT backbones (gauge caps refused 6-25% scale
+  corrections; 8-18 rejections/row) and a one-sided fit slid vggt_smr scan13. v136 evaluator: symmetric fit,
+  robust similarity init, sanity caps only. CPU re-score = scripts/rescore_matrix_dtu.sh (~3-4 h).
+  ETH3D valid: VGGT 0.490->0.437, pi3 0.122, DUSt3R 0.742, MASt3R 0.653; read HURTS Fast3R/StreamVGGT (non-
+  commensurable orderings). VGGT-Omega 0.047 = contamination caveat (authors' README) -> marked with §.
+- v136 re-score: rejections 0-3/row; MASt3R 0.80, VGGT-Omega 0.78->0.68, pi3 1.04, STream3R 1.75->1.22, StreamVGGT
+  2.92->2.30, DUSt3R(swin-5) 2.11, Fast3R 4.7. Defect: median fit let a 23%-shrunk cloud win (VGGT scan13 0.91).
+  v137: fit = truncated Chamfer mean. v138: FINAL re-score done; VGGT 0.441/0.396 reproduced exactly; final
+  Table 1 in iclr2027_overleaf_v138.zip. DENSE BENCHMARK SECTION CLOSED. Next: NVS training on GSO.
   Order-invariant backbones (dust3r, mast3r, pi3) run one read (+SMR == raw by construction).
 - Native point maps exposed for all point-map backbones (assemble world_points; pi3); conf guard for sigmoid conf.
 - Known VGGT cells: DTU 0.552/0.330/0.441 -> 0.476/0.315/0.396; ETH3D 0.415/0.565/0.490 -> 0.274/0.599/0.437.
@@ -50,7 +58,7 @@ If needed read the ENTIRE paper incl. supplementary for eval details.
 
 ## INFRASTRUCTURE (persistent sandbox /home/claude; server ssh soumick@zlab-ws3)
 - Sandbox repo /home/claude/smr mirrors server ~/smr. Latest shipped:
-  smr_updates135.zip (v135). Key tools: experiments/points_suite.py (v120:
+  smr_updates141.zip (v141). Key tools: experiments/points_suite.py (v120:
   windows+overlap, chained junctions, tau-rel gate, keep-singles, --gt-cams,
   --n-views/--view-seed, --conf-pct), scripts/dtu_eval.py (v121: ObsMask/BB/plane
   protocol, --points-dir, --icp Sim3-ICP; CALIBRATED: reproduces furu/tola/camp
@@ -66,7 +74,7 @@ If needed read the ENTIRE paper incl. supplementary for eval details.
   windows+memory BEAT native). Sandbox copy: /home/claude/iclr_paper/iclr2027.
 - Transcripts: /mnt/transcripts (see journal.txt) for verbatim history.
 
-## IMMEDIATE NEXT ACTIONS (UPDATE_NOTES_v133.md)
-1. Launch the seed + three GPU screens (§2); check the first scan of each backbone for the auto-route/guard lines.
-2. When done: build_main_table.py -> paper/tab_main.tex -> Overleaf (§4); score P37-P40.
-3. NVS training on GSO.
+## IMMEDIATE NEXT ACTIONS (UPDATE_NOTES_v139.md)
+1. NVS dry run (§4): 20 objaverse + 5 GSO, render, LOOK at one GSO input view (up-axis check), report s/view.
+2. Full fetch + render (§5) on 3 GPUs (~13 h predicted).
+3. v140: Gaussian head + trainer + GSO evaluator; then rows raw / +SMR read; Overleaf Table 7 rows.

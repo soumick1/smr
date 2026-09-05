@@ -1,3 +1,4 @@
+% built 2026-09-05 07:17 by scripts/build_main_table.py from /tmp/mr3/outputs/reports/matrix
 \begin{table}[t]
 \centering\scriptsize
 \setlength{\tabcolsep}{2.4pt}
@@ -6,27 +7,32 @@
 windows; +\smr{} = causal scaffold memory; +\smr{}+PGO adds the final robust solve. At $N{=}10$
 (one window) and, on these data, $N{=}50$ (no revisits yet) the three rows are identical --- the
 floor of Sec.~\ref{sec:correct}, measured. $^{\dagger}$DUSt3R/MASt3R length axis on a stated
-10-sequence CO3D subset (pairwise-alignment runtime); their RE10K length cells (10-clip subset)
-are a 10-clip subset$^{\ddagger}$. Native and $^{\ddagger}$ windowed cells at $N{=}10$ differ
-only by sample (100 vs.\ 10 clips). OOM = exceeds a 46\,GB GPU. RE10K frames are uniform
-$\le$480p re-extractions shared by all rows.
+10-sequence CO3D subset (pairwise-alignment runtime); their RE10K length cells are a 10-clip
+subset$^{\ddagger}$. Native and $^{\ddagger}$ windowed cells at $N{=}10$ differ only by sample
+(100 vs.\ 10 clips). OOM = exceeds a 46\,GB GPU. RE10K frames are uniform $\le$480p
+re-extractions shared by all rows.
 \textbf{Dense MVS} (DTU, 22 standard scans, all 49 views, Chamfer mm$\downarrow$) and
 \textbf{point maps} (ETH3D, 13 scenes, ten frames, official rendered depth and masks,
-Umeyama on per-pixel correspondences, Chamfer m$\downarrow$): one harness for every row
-(official DTU evaluator with masks and 0.2\,mm downsampling; gauge = converged point-to-plane
-Sim(3) refinement onto the scan; each backbone's native point map --- its point head where it
-has one, depth $\times$ camera otherwise --- with confidence $>2$, or the top 68\% for
-sigmoid confidences). Both benchmarks fit one window, so raw is the backbone's single pass
-and +\smr{} is the memory's in-window read: four orderings of the same views written to one
-scaffold, symmetric re-measure of per-pass scale, consensus (median on DTU, corroborated
-pixels only on ETH3D). There is no junction graph inside one window, so +\smr{}+PGO equals
-+\smr{}; and for order-invariant backbones (DUSt3R, MASt3R: pairwise + global alignment;
-$\pi^3$: permutation-equivariant) the read is the identity, so +\smr{} equals raw. Streaming
-backbones: native = one causal pass; windowed rows use 16-view windows fused by their median,
-+\smr{} adds the content re-measure. Published anchors under the authors' own protocols:
-VGGT DTU 0.389/0.374/0.382 (not reproduced feed-forward by an independent study
-\citep{langendoerfer2026vggt} nor by us), ETH3D 0.873/0.482/0.677. Superscripts on Overall
-give the number of scans/scenes when a row is incomplete.}
+Umeyama on per-pixel correspondences, Chamfer m$\downarrow$): one harness for every row.
+Official DTU evaluator (masks, 0.2\,mm downsampling); gauge = Sim(3) refinement onto the scan,
+chosen by a symmetric fit criterion among the camera alignment, a region-restricted
+point-to-plane ICP, and the same from a robust similarity initialisation. Each backbone
+contributes its native point map (point head where it has one, depth $\times$ camera
+otherwise) with confidence $>2$ (top 68\% for sigmoid confidences). Both benchmarks fit one
+window: raw is the single pass; +\smr{} is the memory's in-window read --- four orderings of the
+same views written to one scaffold, symmetric re-measure of per-pass scale, consensus (median
+on DTU, corroborated pixels only on ETH3D). No junction graph exists inside one window, so
++\smr{}+PGO equals +\smr{}. The read is the identity for order-invariant backbones (DUSt3R and
+MASt3R: pairwise + global alignment; $\pi^3$: permutation-equivariant), and it presupposes
+commensurable passes: for Fast3R and the causal StreamVGGT/STream3R, orderings yield
+different reconstructions and the corroborated read keeps too little (ETH3D). DUSt3R on DTU
+uses a sliding-window pair graph (window 5); its complete graph over 49 views exceeds 46\,GB.
+$^{\S}$The VGGT-$\Omega$ authors report possible benchmark contamination of the released
+checkpoint; ETH3D's training scenes are this benchmark. Streaming backbones: native = one causal
+pass; windowed rows use 16-view windows fused by their median, +\smr{} adds the content
+re-measure. Published anchors under the authors' own protocols: VGGT DTU 0.389/0.374/0.382
+(not reproduced feed-forward by \citet{langendoerfer2026vggt} nor by us), ETH3D 0.873/0.482/0.677.
+Superscripts on Overall give the number of scans/scenes when a row is incomplete.}
 \label{tab:pose}
 \resizebox{\linewidth}{!}{%
 \begin{tabular}{@{}l cc cc cc cc ccc ccc@{}}
@@ -37,40 +43,40 @@ give the number of scans/scenes when a row is incomplete.}
 \cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}\cmidrule(lr){8-9}\cmidrule(lr){10-12}\cmidrule(lr){13-15}
 & RE10K & CO3D & RE10K & CO3D & RE10K & CO3D & RE10K & CO3D & Acc & Comp & Overall & Acc & Comp & Overall \\
 \midrule
-DUSt3R (raw) & 65.6 & 88.9 & 88.0$^{\ddagger}$ & 88.8$^{\dagger}$ & 85.9$^{\ddagger}$ & 88.0$^{\dagger}$ & 82.6$^{\ddagger}$ & 83.9$^{\dagger}$ & -- & -- & -- & -- & -- & -- \\
-\;+\smr{} & 65.6 & 88.9 & 88.0$^{\ddagger}$ & 88.8$^{\dagger}$ & 85.6$^{\ddagger}$ & \textbf{89.5}$^{\dagger}$ & 82.5$^{\ddagger}$ & \textbf{86.6}$^{\dagger}$ & -- & -- & -- & -- & -- & -- \\
-\;+\smr{}+PGO & 65.6 & 88.9 & 88.0$^{\ddagger}$ & 88.8$^{\dagger}$ & 85.6$^{\ddagger}$ & \textbf{89.5}$^{\dagger}$ & 82.5$^{\ddagger}$ & \textbf{86.6}$^{\dagger}$ & -- & -- & -- & -- & -- & -- \\
+DUSt3R (raw) & 65.6 & 88.9 & 88.0$^{\ddagger}$ & 88.8$^{\dagger}$ & 85.9$^{\ddagger}$ & 88.0$^{\dagger}$ & 82.6$^{\ddagger}$ & 83.9$^{\dagger}$ & 2.891 & 1.276 & 2.083 & 0.408 & 1.077 & 0.742 \\
+\;+\smr{} & 65.6 & 88.9 & 88.0$^{\ddagger}$ & 88.8$^{\dagger}$ & 85.6$^{\ddagger}$ & \textbf{89.5}$^{\dagger}$ & 82.5$^{\ddagger}$ & \textbf{86.6}$^{\dagger}$ & 2.891 & 1.276 & 2.083 & 0.408 & 1.077 & 0.742 \\
+\;+\smr{}+PGO & 65.6 & 88.9 & 88.0$^{\ddagger}$ & 88.8$^{\dagger}$ & 85.6$^{\ddagger}$ & \textbf{89.5}$^{\dagger}$ & 82.5$^{\ddagger}$ & \textbf{86.6}$^{\dagger}$ & 2.891 & 1.276 & 2.083 & 0.408 & 1.077 & 0.742 \\
 \midrule
-Fast3R (raw) & 71.2 & 90.9 & 84.3 & 88.3 & 86.1 & 86.7 & 86.6 & 82.4 & -- & -- & -- & -- & -- & -- \\
-\;+\smr{} & 71.2 & 90.9 & 84.3 & 88.3 & 86.0 & 85.1 & 86.5 & 84.2 & -- & -- & -- & -- & -- & -- \\
-\;+\smr{}+PGO & 71.2 & 90.9 & 84.3 & 88.3 & 86.0 & 85.1 & 86.5 & \textbf{84.3} & -- & -- & -- & -- & -- & -- \\
+Fast3R (raw) & 71.2 & 90.9 & 84.3 & 88.3 & 86.1 & 86.7 & 86.6 & 82.4 & 4.672 & 4.134 & 4.403 & 0.663 & 0.897 & 0.780 \\
+\;+\smr{} & 71.2 & 90.9 & 84.3 & 88.3 & 86.0 & 85.1 & 86.5 & 84.2 & 4.486 & 3.668 & \textbf{4.077} & 0.248 & 4.326 & 2.287$^{\,12}$ \\
+\;+\smr{}+PGO & 71.2 & 90.9 & 84.3 & 88.3 & 86.0 & 85.1 & 86.5 & \textbf{84.3} & 4.486 & 3.668 & \textbf{4.077} & 0.248 & 4.326 & 2.287$^{\,12}$ \\
 \midrule
-MASt3R (raw) & 85.5 & 93.0 & 95.3$^{\ddagger}$ & 89.6$^{\dagger}$ & 95.2$^{\ddagger}$ & 88.5$^{\dagger}$ & 93.8$^{\ddagger}$ & 86.6$^{\dagger}$ & -- & -- & -- & -- & -- & -- \\
-\;+\smr{} & 85.5 & 93.0 & 95.3$^{\ddagger}$ & 89.6$^{\dagger}$ & 95.3$^{\ddagger}$ & 88.5$^{\dagger}$ & 94.3$^{\ddagger}$ & 86.5$^{\dagger}$ & -- & -- & -- & -- & -- & -- \\
-\;+\smr{}+PGO & 85.5 & 93.0 & 95.3$^{\ddagger}$ & 89.6$^{\dagger}$ & 95.3$^{\ddagger}$ & 88.7$^{\dagger}$ & 94.3$^{\ddagger}$ & 86.8$^{\dagger}$ & -- & -- & -- & -- & -- & -- \\
+MASt3R (raw) & 85.5 & 93.0 & 95.3$^{\ddagger}$ & 89.6$^{\dagger}$ & 95.2$^{\ddagger}$ & 88.5$^{\dagger}$ & 93.8$^{\ddagger}$ & 86.6$^{\dagger}$ & 1.036 & 0.561 & 0.799 & 0.583 & 0.722 & 0.653 \\
+\;+\smr{} & 85.5 & 93.0 & 95.3$^{\ddagger}$ & 89.6$^{\dagger}$ & 95.3$^{\ddagger}$ & 88.5$^{\dagger}$ & 94.3$^{\ddagger}$ & 86.5$^{\dagger}$ & 1.036 & 0.561 & 0.799 & 0.583 & 0.722 & 0.653 \\
+\;+\smr{}+PGO & 85.5 & 93.0 & 95.3$^{\ddagger}$ & 89.6$^{\dagger}$ & 95.3$^{\ddagger}$ & 88.7$^{\dagger}$ & 94.3$^{\ddagger}$ & 86.8$^{\dagger}$ & 1.036 & 0.561 & 0.799 & 0.583 & 0.722 & 0.653 \\
 \midrule
-VGGT (raw) & 73.7 & 95.7 & 78.5 & 94.5 & 78.7 & 92.2 & 78.5 & 90.0 & 0.552 & 0.330 & 0.441 & 0.415 & 0.565 & 0.490 \\
-\;+\smr{} & 73.7 & 95.7 & 78.5 & 94.5 & 78.6 & 92.3 & 78.1 & 93.7 & 0.476 & 0.315 & \textbf{0.396} & 0.274 & 0.599 & \textbf{0.437} \\
-\;+\smr{}+PGO & 73.7 & 95.7 & 78.5 & 94.5 & 78.6 & \textbf{92.6} & 78.1 & \textbf{93.9} & 0.476 & 0.315 & \textbf{0.396} & 0.274 & 0.599 & \textbf{0.437} \\
+VGGT (raw) & 73.7 & 95.7 & 78.5 & 94.5 & 78.7 & 92.2 & 78.5 & 90.0 & 0.551 & 0.332 & 0.441 & 0.415 & 0.565 & 0.490 \\
+\;+\smr{} & 73.7 & 95.7 & 78.5 & 94.5 & 78.6 & 92.3 & 78.1 & 93.7 & 0.476 & 0.316 & \textbf{0.396} & 0.274 & 0.599 & \textbf{0.437} \\
+\;+\smr{}+PGO & 73.7 & 95.7 & 78.5 & 94.5 & 78.6 & \textbf{92.6} & 78.1 & \textbf{93.9} & 0.476 & 0.316 & \textbf{0.396} & 0.274 & 0.599 & \textbf{0.437} \\
 \midrule
-VGGT-$\Omega$ (raw) & 88.9 & 95.7 & 95.7 & 93.2 & 95.4 & 93.6 & 94.9 & 91.6 & -- & -- & -- & -- & -- & -- \\
-\;+\smr{} & 88.9 & 95.7 & 95.7 & 93.2 & 95.5 & 93.8 & 95.2 & 94.4 & -- & -- & -- & -- & -- & -- \\
-\;+\smr{}+PGO & 88.9 & 95.7 & 95.7 & 93.2 & 95.5 & \textbf{94.2} & 95.2 & \textbf{94.7} & -- & -- & -- & -- & -- & -- \\
+VGGT-$\Omega$ (raw)$^{\S}$ & 88.9 & 95.7 & 95.7 & 93.2 & 95.4 & 93.6 & 94.9 & 91.6 & 1.202 & 0.296 & 0.749 & 0.040 & 0.055 & 0.047 \\
+\;+\smr{} & 88.9 & 95.7 & 95.7 & 93.2 & 95.5 & 93.8 & 95.2 & 94.4 & 1.025 & 0.284 & \textbf{0.655} & 0.036 & 0.050 & \textbf{0.043} \\
+\;+\smr{}+PGO & 88.9 & 95.7 & 95.7 & 93.2 & 95.5 & \textbf{94.2} & 95.2 & \textbf{94.7} & 1.025 & 0.284 & \textbf{0.655} & 0.036 & 0.050 & \textbf{0.043} \\
 \midrule
-$\pi^3$ (raw) & 88.2 & 96.3 & 96.4 & 94.2 & 95.9 & 93.7 & 95.2 & 89.9 & -- & -- & -- & -- & -- & -- \\
-\;+\smr{} & 88.2 & 96.3 & 96.4 & 94.2 & 95.9 & 94.7 & 95.4 & 92.9 & -- & -- & -- & -- & -- & -- \\
-\;+\smr{}+PGO & 88.2 & 96.3 & 96.4 & 94.2 & 95.9 & \textbf{94.8} & 95.4 & \textbf{93.3} & -- & -- & -- & -- & -- & -- \\
+$\pi^3$ (raw) & 88.2 & 96.3 & 96.4 & 94.2 & 95.9 & 93.7 & 95.2 & 89.9 & 1.746 & 0.335 & 1.041 & 0.098 & 0.145 & 0.122 \\
+\;+\smr{} & 88.2 & 96.3 & 96.4 & 94.2 & 95.9 & 94.7 & 95.4 & 92.9 & 1.746 & 0.335 & 1.041 & 0.098 & 0.145 & 0.122 \\
+\;+\smr{}+PGO & 88.2 & 96.3 & 96.4 & 94.2 & 95.9 & \textbf{94.8} & 95.4 & \textbf{93.3} & 1.746 & 0.335 & 1.041 & 0.098 & 0.145 & 0.122 \\
 \midrule
 \multicolumn{15}{@{}l}{\emph{streaming backbones: native = one causal pass (their intended mode); raw/+\smr{} = windowed}}\\
-StreamVGGT (native) & 81.2 & 92.7 & 78.6 & 92.8 & 77.7 & 92.0 & OOM & OOM & -- & -- & -- & -- & -- & -- \\
-\;(raw, windowed) & 86.7$^{\ddagger}$ & 92.7 & 86.6$^{\ddagger}$ & 90.2 & 86.8$^{\ddagger}$ & 87.1 & 85.7$^{\ddagger}$ & 82.9 & -- & -- & -- & -- & -- & -- \\
-\;+\smr{} & 86.7$^{\ddagger}$ & 92.7 & 86.6$^{\ddagger}$ & 90.2 & 86.8$^{\ddagger}$ & 87.3 & 85.7$^{\ddagger}$ & 85.8 & -- & -- & -- & -- & -- & -- \\
-\;+\smr{}+PGO & 86.7$^{\ddagger}$ & 92.7 & 86.6$^{\ddagger}$ & 90.2 & 86.8$^{\ddagger}$ & 87.5 & 85.7$^{\ddagger}$ & \textbf{85.9} & -- & -- & -- & -- & -- & -- \\
+StreamVGGT (native) & 81.2 & 92.7 & 78.6 & 92.8 & 77.7 & 92.0 & OOM & OOM & 4.944 & 0.834 & 2.888 & 0.520 & 0.894 & 0.707 \\
+\;(raw, windowed) & 86.7$^{\ddagger}$ & 92.7 & 86.6$^{\ddagger}$ & 90.2 & 86.8$^{\ddagger}$ & 87.1 & 85.7$^{\ddagger}$ & 82.9 & 5.575 & 1.136 & 3.356 & 0.898 & 1.050 & 0.974 \\
+\;+\smr{} & 86.7$^{\ddagger}$ & 92.7 & 86.6$^{\ddagger}$ & 90.2 & 86.8$^{\ddagger}$ & 87.3 & 85.7$^{\ddagger}$ & 85.8 & 5.613 & 0.978 & \textbf{3.296} & 0.671 & 1.341 & 1.006 \\
+\;+\smr{}+PGO & 86.7$^{\ddagger}$ & 92.7 & 86.6$^{\ddagger}$ & 90.2 & 86.8$^{\ddagger}$ & 87.5 & 85.7$^{\ddagger}$ & \textbf{85.9} & 5.613 & 0.978 & \textbf{3.296} & 0.671 & 1.341 & 1.006 \\
 \midrule
-STream3R (native) & 89.2 & 92.1 & 87.0 & OOM & OOM & OOM & OOM & OOM & -- & -- & -- & -- & -- & -- \\
-\;(raw, windowed) & 93.8$^{\ddagger}$ & 92.1 & 93.2$^{\ddagger}$ & 89.0 & 92.6$^{\ddagger}$ & 87.5 & 89.4$^{\ddagger}$ & 84.8 & -- & -- & -- & -- & -- & -- \\
-\;+\smr{} & 93.8$^{\ddagger}$ & 92.1 & 93.2$^{\ddagger}$ & 89.0 & 92.7$^{\ddagger}$ & 87.4 & 89.3$^{\ddagger}$ & 87.1 & -- & -- & -- & -- & -- & -- \\
-\;+\smr{}+PGO & 93.8$^{\ddagger}$ & 92.1 & 93.2$^{\ddagger}$ & 89.0 & 92.7$^{\ddagger}$ & \textbf{87.6} & 89.3$^{\ddagger}$ & \textbf{87.6} & -- & -- & -- & -- & -- & -- \\
+STream3R (native) & 89.2 & 92.1 & 87.0 & OOM & OOM & OOM & OOM & OOM & 2.949 & 0.479 & 1.714 & 0.420 & 0.772 & 0.596 \\
+\;(raw, windowed) & 93.8$^{\ddagger}$ & 92.1 & 93.2$^{\ddagger}$ & 89.0 & 92.6$^{\ddagger}$ & 87.5 & 89.4$^{\ddagger}$ & 84.8 & 3.011 & 0.475 & 1.743 & 0.773 & 0.768 & 0.771 \\
+\;+\smr{} & 93.8$^{\ddagger}$ & 92.1 & 93.2$^{\ddagger}$ & 89.0 & 92.7$^{\ddagger}$ & 87.4 & 89.3$^{\ddagger}$ & 87.1 & 3.252 & 0.506 & 1.879 & 0.562 & 1.330 & 0.946 \\
+\;+\smr{}+PGO & 93.8$^{\ddagger}$ & 92.1 & 93.2$^{\ddagger}$ & 89.0 & 92.7$^{\ddagger}$ & \textbf{87.6} & 89.3$^{\ddagger}$ & \textbf{87.6} & 3.252 & 0.506 & 1.879 & 0.562 & 1.330 & 0.946 \\
 \bottomrule
 \end{tabular}}
 \end{table}
