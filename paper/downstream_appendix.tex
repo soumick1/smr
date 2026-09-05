@@ -1,0 +1,41 @@
+% Appendix: fusion/read policy ablations referenced by tab:dtu and tab:eth3d.
+% \input{downstream_appendix} inside appendix.tex.
+\section{Read and fusion policies for the dense benchmarks}
+\label{app:policies}
+
+Table~\ref{tab:policies} lists the alternatives to the policies used in
+the DTU and ETH3D columns of Table~\ref{tab:pose}. Two operations are involved: the
+in-window \emph{read} over four orderings of the same views, and the
+\emph{fusion} of overlapping 16-view windows. For the read, returning only
+corroborated pixels (two of four orderings within 3\% of depth) is the best
+policy on the protocol metric because a failed ordering is dropped rather
+than averaged; the median over all orderings keeps every pixel and helps
+less, and taking the earliest ordering where reads disagree privileges an
+arbitrary read (on \emph{relief} the failing one). For window fusion an
+overlap pixel has only two witnesses, so their median is the natural
+consensus; dropping disagreeing overlap pixels instead helps on DTU, where
+disagreement is a junction error, and hurts on ETH3D, where it is a
+depth-scale difference on large scenes.
+
+\begin{table}[h]
+\centering\scriptsize
+\setlength{\tabcolsep}{5pt}
+\caption{Policy ablations (Overall; DTU in mm over the 22 standard scans,
+ETH3D in m over 13 scenes). Rows in Table~\ref{tab:pose} are marked $\dagger$.}
+\label{tab:policies}
+\begin{tabular}{@{}l l c c@{}}
+\toprule
+operation & policy where witnesses disagree & DTU & ETH3D \\
+\midrule
+in-window read (4 orderings) & corroborated pixels only$^{\dagger}$ & 0.396 & 0.437 \\
+ & median of all orderings & -- & 0.473 \\
+ & median, abstain above 10\% of depth & -- & 0.487 \\
+ & earliest ordering & -- & 0.484 \\
+\midrule
+window fusion, raw & median of the windows$^{\dagger}$ & 1.249 & 0.467 \\
+ & corroborated overlap pixels only & 1.280 & -- \\
+window fusion, + re-measure & median of the windows$^{\dagger}$ & 1.008 & 0.434 \\
+ & corroborated overlap pixels only & 0.906 & 0.562 \\
+\bottomrule
+\end{tabular}
+\end{table}

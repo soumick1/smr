@@ -58,16 +58,25 @@ def K_at_grid(K0, wh_img, depth_hw):
 # ----------------------------------------------------------------- fusion ---
 def consensus_fuse(ctx_points, m=2, tau=0.01, ref_depth=None, tau_abs=None,
                    tau_rel=None, zdist=None, zdist_all=None, keep_singles=True,
-                   fallback=False):
+                   fallback="median", abstain_rel=0.10, abstain_factor=5.0):
     """ctx_points: list over contexts of dicts view->(P,3) arrays for the SAME
-    pixel grid (NaN where invalid). Returns fused view->(P,3) with NaN where
-    consensus fails, plus per-view keep masks.
+    pixel grid (NaN where invalid). Returns fused view->(P,3).
 
-    fallback=True (v125): where fewer than m contexts agree, return the point
-    of the EARLIEST context that has one instead of NaN -- a read can be more
-    accurate than a single pass where witnesses agree, but never emptier."""
+    Where fewer than m contexts agree within the gate, `fallback` decides:
+      "median" (v126 default): the median of ALL witnesses -- the robust
+                estimate, symmetric, privileges no pass; never emptier than a pass;
+      "first":  the earliest witness (v125; privileges context 0 -- on ETH3D
+                relief that read was the failing one and this undid the gain);
+      "none":   NaN (abstain; v124 behaviour, most accurate, loses completeness).
+    v127: with "median", pixels whose witnesses disagree GROSSLY -- median
+    witness-to-consensus distance above abstain_rel x depth (or abstain_factor
+    x the gate when no depth is known) -- are abstained (NaN) instead: reads
+    that contradict each other by metres carry no usable estimate, and
+    keeping a compromise point drags the downstream alignment (ETH3D relief)."""
     fused = {}
-    n_fallback = 0
+    n_fallback = 0; n_abstain = 0
+    if fallback is True: fallback = "first"
+    if fallback is False or fallback is None: fallback = "none"
     all_views = sorted({v for c in ctx_points for v in c})
     import warnings
     for v in all_views:
@@ -96,7 +105,19 @@ def consensus_fuse(ctx_points, m=2, tau=0.01, ref_depth=None, tau_abs=None,
                 out = np.nanmedian(sel, axis=0)
         fail = n_ok < m
         out[fail] = np.nan
-        if fallback and fail.any():
+        if fallback == "median" and fail.any():
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                spread = np.nanmedian(d, axis=0)         # typical witness deviation from the consensus
+            if zdist is not None and v in zdist:
+                limit = abstain_rel * z
+            else:
+                limit = abstain_factor * (thr if np.ndim(thr) else np.full(len(fail), thr))
+            gross = (spread > limit) if abstain_rel > 0 else np.zeros(len(fail), bool)
+            use = fail & ~gross & np.isfinite(med).all(1)  # modest disagreement: median of all witnesses
+            out[use] = med[use]; n_fallback += int(use.sum())
+            n_abstain += int((fail & gross).sum())
+        elif fallback == "first" and fail.any():
             first = np.full(out.shape, np.nan)
             for c in range(stacks.shape[0]):           # earliest finite witness per pixel
                 take = np.isnan(first).any(1) & np.isfinite(stacks[c]).all(1)
@@ -104,8 +125,9 @@ def consensus_fuse(ctx_points, m=2, tau=0.01, ref_depth=None, tau_abs=None,
             use = fail & np.isfinite(first).all(1)
             out[use] = first[use]; n_fallback += int(use.sum())
         fused[v] = out
-    if fallback:
-        print(f"consensus: {n_fallback:,} pixels fell back to the earliest witness")
+    if fallback != "none":
+        print(f"consensus: {n_fallback:,} pixels below agreement m={m} -> fallback '{fallback}'"
+              + (f"; {n_abstain:,} abstained (witnesses disagree > {abstain_rel*100:.0f}% of depth)" if fallback == "median" else ""))
     return fused
 
 def acc_comp(pred, gt, max_dist=20.0):
@@ -142,22 +164,37 @@ def synthetic(seed=0, n_ctx=5, n_pts=4000, bias=0.02, noise=0.01, outlier=0.08):
     print("SYNTHETIC PROOF PASSED: fused Overall < single Overall")
 
 # ------------------------------------------------------------------- real ---
-def conf_mask(o, j, pct, abs_thr=None, key="conf"):
+_CONF_GUARD_NOTE = set()
+
+
+def conf_mask(o, j, pct, abs_thr=None, key="conf", guard=0.05, guard_pct=32.0):
     """Per-pixel keep mask from the backbone's confidence map `key`:
     percentile cut (--conf-pct) and/or absolute cut (--conf-abs; VGGT's expp1
     confidences are >1, and C>2 <=> positive loss weight -- the threshold the
-    independent DTU study of Langendoerfer et al. 2026 recommends)."""
+    independent DTU study of Langendoerfer et al. 2026 recommends).
+    v133 guard: if the absolute cut would keep fewer than `guard` of the pixels
+    (e.g. a sigmoid confidence in (0,1) against C>2), fall back to keeping the
+    top (100-guard_pct)% by percentile and say so once."""
     c = o.extras.get(key) if hasattr(o, "extras") and o.extras else None
     if (pct is None and abs_thr is None) or c is None:
         if (pct is not None or abs_thr is not None) and c is None:
             print(f"  [warn] confidence filter set but backbone exposes no '{key}'; keeping all")
         return None
     cj = np.asarray(c[j], dtype=np.float32)
-    m = np.isfinite(cj)
+    fin = np.isfinite(cj)
+    m = fin.copy()
     if abs_thr is not None:
-        m &= cj > abs_thr
+        m_abs = fin & (cj > abs_thr)
+        if m_abs.sum() < guard * fin.sum():
+            m &= cj >= np.percentile(cj[fin], guard_pct)
+            if key not in _CONF_GUARD_NOTE:
+                _CONF_GUARD_NOTE.add(key)
+                print(f"  [conf] absolute cut > {abs_thr} keeps {m_abs.mean()*100:.1f}% of '{key}' "
+                      f"(range {np.nanmin(cj):.2f}-{np.nanmax(cj):.2f}); using the top {100-guard_pct:.0f}% by percentile instead")
+        else:
+            m &= m_abs
     if pct:
-        m &= cj >= np.percentile(cj[np.isfinite(cj)], pct)
+        m &= cj >= np.percentile(cj[fin], pct)
     return m
 
 
@@ -247,13 +284,25 @@ def content_align(ctx_pts, ctx_cams, model="scale", trim=0.2, iters=2, max_corr=
                 res1 = np.linalg.norm(C + s * dX - Y, axis=1)
                 print(f"content-align ctx {k} it{it}: {len(X):,} corr, depth scale x{s:.4f} about the pass cameras, "
                       f"median residual {np.median(res0):.4f} -> {np.median(res1):.4f}")
-    if ref_mode == "mean" and model == "scale" and len(out) > 1:
+    same_views = len(out) > 1 and all(set(c) == set(out[0]) for c in out[1:])
+    if ref_mode == "mean" and model == "scale" and same_views:
+        # v130: the symmetric reference is a REPEATED-READS operation (all contexts see
+        # the same views).  For chained windows a global depth scale is absorbed by the
+        # evaluator's gauge, and scaling each window about its OWN placed cameras pulls
+        # shared views apart by (1/g-1)*(camera-placement difference) -- on ETH3D windows
+        # that cost 45% of the pixels.  Reads only, and about ONE common centre per view
+        # (the earliest context's camera), so coincident points stay coincident.
         g = float(np.exp(np.mean(np.log(applied))))     # geometric mean of the applied factors
+        common = {}
         for k in range(len(out)):
-            cam_of = cams_all[k]
-            out[k] = {v: cam_of[v] + (1.0 / g) * (P - cam_of[v]) for v, P in out[k].items()}
+            for v in out[k]:
+                common.setdefault(v, cams_all[k][v])
+        for k in range(len(out)):
+            out[k] = {v: common[v] + (1.0 / g) * (P - common[v]) for v, P in out[k].items()}
         print(f"content-align: symmetric reference -- factors {[round(a, 4) for a in applied]} "
-              f"renormalised by 1/{g:.4f} (geometric mean = 1; no pass privileged)")
+              f"renormalised by 1/{g:.4f} about one centre per view (geometric mean = 1; no pass privileged)")
+    elif ref_mode == "mean" and model == "scale" and len(out) > 1:
+        print("content-align: contexts are windows (different views) -> no renormalisation; the global scale is the gauge's")
     return out
 
 
@@ -290,7 +339,15 @@ def real(a):
         print(f"pilot row '{a.row}': {len(key)} keyframes, {len(pilot['chunks'])} chunks from {a.pilot}")
     paths = [str(p) for p in d["image_paths"]]
     V = len(paths)
-    bb = get_backbone(a.backbone)
+    def _auto(v):
+        for cast in (int, float):
+            try: return cast(v)
+            except ValueError: pass
+        return {"true": True, "false": False}.get(v.lower(), v)
+    bb_kw = dict((k, _auto(v)) for k, v in (x.split("=", 1) for x in (a.backbone_kw or [])))
+    if bb_kw:
+        print(f"backbone kwargs: {bb_kw}")
+    bb = get_backbone(a.backbone, **bb_kw)
     # contexts: OVERLAPPING WINDOWS over the (ordered) view list, exactly
     # like the pose pipeline: consecutive contexts share `--overlap` views,
     # so every Sim(3) junction is anchored on many poses, and alignment is
@@ -388,6 +445,10 @@ def real(a):
         o = outs[k][1]
         return o.depth[j] if depth_used[k][j] is None else depth_used[k][j]
 
+    if a.points_from == "auto":                    # v133: the backbone's native point map if it has one
+        has_ph = outs[0][1].extras.get("world_points") is not None
+        a.points_from = "pointhead" if has_ph else "depth"
+        print(f"points-from auto -> {a.points_from} ({'native point map exposed' if has_ph else 'depth x camera'})")
     conf_key = "world_points_conf" if a.points_from == "pointhead" else "conf"
 
     def view_mask(k, j):
@@ -424,8 +485,20 @@ def real(a):
     if pilot is not None:                       # row frame -> GT over ALL keyframes (ATE-style)
         sG, RG, tG = sim3_from_poses(pilot["est"], gt_poses)
     else:
-        sG, RG, tG = sim3_from_poses(np.stack([pose_of[v] for v in ref_ids]),
-                                     np.stack([gt_poses[v] for v in ref_ids]))
+        # v128: the global frame is fitted over EVERY view's chained camera (each view
+        # taken from the first context that holds it, mapped through T[k]), not only
+        # context 0's cameras -- a 16-camera arc gave windowed clouds a 30 mm initial
+        # misalignment that the evaluator's region-restricted ICP could not recover.
+        pose_all = {}
+        for k, (ids, o) in enumerate(outs):
+            sk = float(np.cbrt(abs(np.linalg.det(T[k][:3, :3]))))
+            for j, v in enumerate(ids):
+                if v not in pose_all:
+                    M = T[k] @ o.poses[j]
+                    M[:3, :3] /= sk                 # keep a proper rotation block
+                    pose_all[v] = M
+        vs = sorted(pose_all)
+        sG, RG, tG = sim3_from_poses(np.stack([pose_all[v] for v in vs]), np.stack([gt_poses[v] for v in vs]))
     print(f"ref->GT: scale {sG:.4f}")
     def to_gt(P): return (sG * (RG @ P.T)).T + tG
     if a.gt_cams:
@@ -477,16 +550,18 @@ def real(a):
     single = np.concatenate([p for p in ctx_pts[0].values()])
     fused_v = consensus_fuse(ctx_pts, m=a.m, tau=None, tau_abs=a.tau_m,
                              tau_rel=a.tau_rel, zdist=zs[0], zdist_all=zs,
-                             keep_singles=not a.strict, fallback=not a.no_fallback)
+                             keep_singles=not a.strict, fallback=a.fallback, abstain_rel=a.abstain_rel)
     fused = np.concatenate([p for p in fused_v.values()])
     print(f"consensus gate: max({a.tau_m} m, {a.tau_rel} x depth)")
     out = pathlib.Path(a.out_dir); out.mkdir(parents=True, exist_ok=True)
     for name, P in (("single", single), ("fused", fused)):
-        P = P[np.isfinite(P).all(-1)]
-        with open(out / f"{name}.ply", "w") as f:
-            f.write("ply\nformat ascii 1.0\nelement vertex %d\n"
-                    "property float x\nproperty float y\nproperty float z\nend_header\n" % len(P))
-            np.savetxt(f, P, fmt="%.5f")
+        P = P[np.isfinite(P).all(-1)].astype(np.float32)
+        # v134: binary little-endian PLY (float32 xyz): ~10x faster to write and read than
+        # ASCII at 5-10 M points; dtu_eval.py reads both (with or without plyfile).
+        with open(out / f"{name}.ply", "wb") as f:
+            f.write(("ply\nformat binary_little_endian 1.0\nelement vertex %d\n"
+                     "property float x\nproperty float y\nproperty float z\nend_header\n" % len(P)).encode())
+            P.astype("<f4").tofile(f)
         print(f"{name}: {len(P):,} pts -> {out/f'{name}.ply'}")
     json.dump({**vars(a), "n_views_used": V, "view_ids_in_gt": sel_ids},
               open(out / "run.json", "w"), indent=1)
@@ -545,8 +620,10 @@ def build_parser():
     ap.add_argument("--no-geo-avg", action="store_true", help="keep the reference depth instead of the consistent-view average")
     ap.add_argument("--save-maps", action="store_true", help="write maps.npz (per-view point maps) for eth3d_pointmap_eval.py")
     # v123: point-map head route and absolute confidence threshold (Langendoerfer et al. 2026: VGGT-p, C>2.0)
-    ap.add_argument("--points-from", choices=["depth", "pointhead"], default="depth",
-                    help="depth: unproject depth with cameras (VGGT 'Depth+Cam'); pointhead: point-map head ('Point')")
+    ap.add_argument("--backbone-kw", action="append", default=[],
+                    help="key=value passed to the backbone constructor, repeatable (e.g. scene_graph=swin-5 for dust3r)")
+    ap.add_argument("--points-from", choices=["depth", "pointhead", "auto"], default="depth",
+                    help="depth: unproject depth with cameras (VGGT 'Depth+Cam'); pointhead: point-map head ('Point'); auto: pointhead if exposed")
     ap.add_argument("--conf-abs", type=float, default=None,
                     help="keep pixels with confidence > this absolute value (VGGT conf is expp1 > 1; 2.0 = positive weight)")
     # v123: downstream matrix -- place the passes under a pose-pipeline row (pilot_a.py --save-est)
@@ -561,8 +638,10 @@ def build_parser():
     ap.add_argument("--content-ref", choices=["mean", "first"], default="mean",
                     help="mean: renormalise so no pass is privileged (default); first: keep context 0's scale")
     ap.add_argument("--content-trim", type=float, default=0.2)
-    ap.add_argument("--no-fallback", action="store_true",
-                    help="drop pixels where consensus fails (old behaviour); default falls back to the earliest witness")
+    ap.add_argument("--fallback", choices=["median", "first", "none"], default="median",
+                    help="where fewer than --m witnesses agree: median of all witnesses (default), earliest witness, or abstain")
+    ap.add_argument("--abstain-rel", type=float, default=0.10,
+                    help="with --fallback median: abstain instead when the witnesses' spread exceeds this fraction of depth (0 = never)")
     ap.add_argument("--content-iters", type=int, default=2)
     return ap
 

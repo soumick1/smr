@@ -1,0 +1,43 @@
+% ---------------------------------------------------------------------------
+% Downstream geometry: DTU dense MVS  and ETH3D point
+% maps .  Paste after the SLAM subsection.  Numbers:
+% UPDATE_NOTES_v129.md.  TODO cells: block W (DTU beyond-window rows).
+% ---------------------------------------------------------------------------
+\subsection{Dense MVS and point maps: the memory inside one window}
+\label{sec:mvs}
+
+The camera-pose rows (Table~\ref{tab:pose}) showed that within one window
+the memory is inert by construction. VGGT's dense benchmarks live inside a
+window: all 49 DTU views fit one pass, the ETH3D protocol uses ten frames.
+Two content-level errors nevertheless remain inside a pass, and both are
+what the read of Sec.~\ref{sec:read} exists for. First, a single forward
+pass depends on the ordering of its frames; writing $K$ orderings of the
+same views to the same scaffold coordinates and returning the consensus is
+the error-correcting read exercised in-window. Second, a pass placed by its
+cameras carries its own point-versus-baseline scale bias (1--4\% on 16-view
+DTU windows, 15--30\% on the ETH3D failure scenes); the re-measure step
+compares the new pass's point maps with the stored cards of the shared
+views and solves that scale about the pass cameras, with no read
+privileged. The read returns a pixel only where two of four reads
+corroborate it within 3\% of depth.
+
+
+
+Three things the DTU and ETH3D columns of Table~\ref{tab:pose} say. Inside a window the memory does not degrade
+the backbone (the protocol rows are the backbone's own output) and, used
+as a read over repeated writes, it improves it: on DTU the read is
+better on every scan and lands where the published feed-forward number
+stands; on ETH3D it halves Accuracy. Where a pass is unreliable the reads
+disagree, and abstaining there is what repairs the failure scenes --- the
+memory declines to answer rather than average a failure. Beyond the window
+the correction that matters is the per-pass scale, invisible to camera
+placement and recovered by re-measuring content against the cards; the
+pose-level rows (chained, +\smr{}, +\smr{}+PGO) are identical on these
+short, revisit-free sets, as the pass-through invariant requires. The
+appendix reports the corroborated-only fusion for the windowed rows,
+which helps on DTU (junction errors) and hurts on ETH3D (depth-scale
+differences), and the median-fallback read on ETH3D.
+
+% bib entries needed (add to references.bib):
+% @article{langendoerfer2026vggt, title={Uncertainty Quality of VGGT: An Analysis on the DTU Benchmark Dataset},
+%   author={Langend{\"o}rfer, Alexander and Landgraf, Steven and Ulrich, Markus}, journal={arXiv:2606.16479}, year={2026}}

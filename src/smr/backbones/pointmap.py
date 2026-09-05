@@ -515,6 +515,13 @@ def assemble(raw: RawViews, pose_convention: str,
     extras = dict(raw.extras or {})
     extras.update(conf=conf, scene_scale=s, intrinsics_all=intr_all,
                   pose_convention=pose_convention)
+    if raw.pts_local is not None:
+        # v133: the backbone's NATIVE point map (its primary output for the
+        # DUSt3R lineage), in the common frame and at the same scale gauge as
+        # depth/poses, so points_suite --points-from pointhead/auto can use it.
+        pl = np.asarray(raw.pts_local, dtype=float) / s
+        wp = np.einsum("kij,khwj->khwi", poses[:, :3, :3], pl) + poses[:, None, None, :3, 3]
+        extras.update(world_points=wp, world_points_conf=conf)
     return BackboneOutput(poses=poses, intrinsics=intr0, depth=depth,
                           rgb=rgb, mask=mask, features=raw.features,
                           extras=extras)

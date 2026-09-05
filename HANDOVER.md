@@ -1,4 +1,4 @@
-# SMR HANDOVER MANIFEST — VGGT Table 2/3 reproduction chase (2026-09-03, v125)
+# SMR HANDOVER MANIFEST — VGGT Table 2/3 reproduction chase (2026-09-05, v135)
 Read this fully before acting. Rules that are LAW in this project:
 code > Overleaf > memory; every patch VERIFIES its landing (assert/grep) before packaging;
 predictions recorded BEFORE runs and scored honestly (current scoreboard 3.0/10);
@@ -31,21 +31,26 @@ If needed read the ENTIRE paper incl. supplementary for eval details.
 - ETH3D windowed+SMR (all views, our instrument): 0.585/0.346/0.466 — better than
   published 0.677 but different protocol (all views). In draft? NOT yet as table.
 
-## STATE (UPDATE_NOTES_v123-125.md)
-- Harness validated (KIT independent study). DTU 23-scan VGGT-d 1.093/0.389/0.741; VGGT-p with
-  C>2 has a coverage defect = the confidence filter itself (scan29: no filter 0.881 vs C>2 1.953).
-- IN-WINDOW MEMORY READ WORKS: scan1 point head, 4 reads + consensus 0.458 vs single 0.560 (P17 hit).
-  Content re-measure recovers 92% of the forced-window loss (0.867 -> 0.585, P18 hit). ETH3D relief
-  1.06 -> 0.26; meadow deterministic failure; courtyard lost Comp (consensus drop-outs, fixed).
-- v125 fixes: content-align symmetric reference (no privileged read; a shadowed variable had
-  disabled it), consensus fallback to the earliest witness (a read is never emptier than a pass).
-- Pose-level SMR/PGO inert on these tables (pass-through), stated as the floor.
-- Scoreboard 9.0/20. Open: P21 (scan1 recipe), P22 (Table-2 rows, 23 scans), P23 (Table-3 rows),
-  P24 (ETH3D beyond-window study). Two-view ScanNet-1500: DROPPED by decision.
+## STATE (UPDATE_NOTES_v133.md) -- MERGED MAIN TABLE; DENSE MATRIX LAUNCHING
+- Table 1 becomes the merged table (scripts/build_main_table.py -> paper/tab_main.tex, label tab:pose):
+  Table-1 rows x {camera AUC@30 (8 cols, verbatim), DTU Acc/Comp/Overall, ETH3D Acc/Comp/Overall}.
+  Dense rows: raw = native pass; +SMR = 4-ordering read; +PGO = read. Streaming: native / windowed raw /
+  windowed + re-measure. Compiles in the Overleaf copy (0 errors, 0 overfull, 14 pages).
+- Dense matrix over 8 backbones: scripts/run_dense_matrix.sh (3 GPUs; markers DONE/OOM/FAILED, result-aware
+  resume, OOM recorded and shown as OOM in the table; tests/test_launcher.sh) + seed script for VGGT.
+- dtu_eval.py rewritten: multi-pred per call, hashed thinning, binary PLY (suite writes binary now). Same numbers.
+- v133 Overleaf zip had STAND-IN StreamVGGT windowed cells -> discarded; v134 zip is real-only.
+- MATRIX RUN DONE (Sep 5): all backbones complete; DUSt3R DTU = OOM on 22/22 (complete pair graph). v135 adds
+  --backbone-kw + a dust3r memory ladder (swin-5 -> swin-3); rerun block in UPDATE_NOTES_v135.md §3.
+  Result files (matrix/*.log, *.jsonl) not yet received -> table not yet scored.
+  Order-invariant backbones (dust3r, mast3r, pi3) run one read (+SMR == raw by construction).
+- Native point maps exposed for all point-map backbones (assemble world_points; pi3); conf guard for sigmoid conf.
+- Known VGGT cells: DTU 0.552/0.330/0.441 -> 0.476/0.315/0.396; ETH3D 0.415/0.565/0.490 -> 0.274/0.599/0.437.
+- Scoreboard 15.0/38. Open: P37-P40 (matrix). Then: NVS training on GSO.
 
 ## INFRASTRUCTURE (persistent sandbox /home/claude; server ssh soumick@zlab-ws3)
 - Sandbox repo /home/claude/smr mirrors server ~/smr. Latest shipped:
-  smr_updates125.zip (v125). Key tools: experiments/points_suite.py (v120:
+  smr_updates135.zip (v135). Key tools: experiments/points_suite.py (v120:
   windows+overlap, chained junctions, tau-rel gate, keep-singles, --gt-cams,
   --n-views/--view-seed, --conf-pct), scripts/dtu_eval.py (v121: ObsMask/BB/plane
   protocol, --points-dir, --icp Sim3-ICP; CALIBRATED: reproduces furu/tola/camp
@@ -61,8 +66,7 @@ If needed read the ENTIRE paper incl. supplementary for eval details.
   windows+memory BEAT native). Sandbox copy: /home/claude/iclr_paper/iclr2027.
 - Transcripts: /mnt/transcripts (see journal.txt) for verbatim history.
 
-## IMMEDIATE NEXT ACTIONS (blocks in UPDATE_NOTES_v125.md §3)
-1. J (GPU 1, 15 min) -> fix the point-head recipe; then K (GPU 1, 2.5 h) = Table 2 rows.
-2. L (GPU 0, 40 min) = Table 3 rows; M (GPU 2, 1 h) = beyond-window ETH3D study.
-3. Streaming backbones raw vs +SMR (their write-once memory) on DTU/ETH3D.
-4. Draft: insert tab:dtu + tab:eth3d into the uploaded Overleaf (published | KIT | ours | +SMR read).
+## IMMEDIATE NEXT ACTIONS (UPDATE_NOTES_v133.md)
+1. Launch the seed + three GPU screens (§2); check the first scan of each backbone for the auto-route/guard lines.
+2. When done: build_main_table.py -> paper/tab_main.tex -> Overleaf (§4); score P37-P40.
+3. NVS training on GSO.

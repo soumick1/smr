@@ -155,9 +155,14 @@ class Pi3Backbone(Backbone):
         depth /= s
         poses = poses.copy()
         poses[:, :3, 3] /= s
+        # v133: pi3's native point map (local points through its camera poses),
+        # same frame and scale gauge as depth/poses.  conf is a sigmoid in (0,1):
+        # use a percentile confidence cut, not an absolute one (points_suite guards this).
+        wp = np.einsum("kij,khwj->khwi", poses[:, :3, :3], local / s) + poses[:, None, None, :3, 3]
 
         return BackboneOutput(poses=poses, intrinsics=K, depth=depth,
                               rgb=np.clip(rgb, 0, 1), mask=mask,
                               extras=dict(conf=conf, scene_scale=s,
                                           intrinsics_all=Ks,
+                                          world_points=wp, world_points_conf=conf,
                                           variant=self.variant))

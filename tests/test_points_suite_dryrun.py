@@ -34,8 +34,8 @@ def plane_depth(K, c2w, H, W):
 class FakeBackbone:
     """Exact plane depth at a 1/8 grid of the 'image', in a frame scaled by 1/0.8
     with 4 % of pixels turned into gross outliers in every view."""
-    def __init__(self, gt, Hd=48, Wd=64, bias=False):
-        self.gt = gt; self.Hd, self.Wd = Hd, Wd; self.bias = bias
+    def __init__(self, gt, Hd=48, Wd=64, bias=False, gross=False):
+        self.gt = gt; self.Hd, self.Wd = Hd, Wd; self.bias = bias; self.gross = gross
 
     def infer(self, image_paths):
         ids = [self.gt["path_to_id"][p] for p in image_paths]
@@ -52,6 +52,8 @@ class FakeBackbone:
             K = self.gt["K"][v].copy(); K[0] *= self.Wd / Wu; K[1] *= self.Hd / Hu
             c2w = self.gt["poses"][v]
             d_clean = plane_depth(K, c2w, self.Hd, self.Wd) * (1.0 + b)     # biased depth, exact cameras
+            if self.gross and ids[0] != 0:                                  # a read that fails grossly on the left half
+                d_clean[:, : self.Wd // 2] *= 1.30
             out = rng.random(d_clean.shape) < 0.04
             d = d_clean * s; d[out] *= rng.uniform(1.1, 1.4, out.sum())
             depths.append(d); Ks.append(K)
@@ -118,19 +120,22 @@ def make_pilot(tmp, gt):
     return out
 
 
-def run_suite(gt, out_dir, extra, bias=False):
+def run_suite(gt, out_dir, extra, bias=False, gross=False):
     args = ["--gt", str(gt["npz"]), "--backbone", "fake", "--w", "8", "--overlap", "0", "--k-ctx", "1",
             "--stride", "1", "--out-dir", str(out_dir), "--save-maps"] + extra
     a = PS.build_parser().parse_args(args)
     import smr.backbones as B
-    B.get_backbone = lambda name, **kw: FakeBackbone(gt, bias=bias)   # monkeypatch registry lookup
+    B.get_backbone = lambda name, **kw: FakeBackbone(gt, bias=bias, gross=gross)   # monkeypatch registry lookup
     PS.real(a)
     return a
 
 
 def plane_err(ply):
-    P = np.loadtxt(ply, skiprows=7, usecols=(0, 1, 2)) if pathlib.Path(ply).stat().st_size else np.zeros((0, 3))
-    return np.abs(P[:, 2]).mean(), len(P)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("dtu_eval_mod", ROOT / "scripts" / "dtu_eval.py")
+    de = importlib.util.module_from_spec(spec); spec.loader.exec_module(de)
+    P = de.read_ply(ply)
+    return (np.abs(P[:, 2]).mean() if len(P) else 0.0), len(P)
 
 
 def test_dryrun():
@@ -182,12 +187,25 @@ def test_dryrun():
         print(f"fallback: single read {n_single:,} finite pixels, fused {n_fused:,}")
         assert n_fused >= n_single, (n_single, n_fused)
         r5 = pathlib.Path(tmp) / "reads_nofb"
-        run_suite(gt, r5, ["--reads", "3", "--points-from", "pointhead", "--conf-abs", "2.0", "--content-align", "--content-ref", "first", "--no-fallback"], bias=True)
+        run_suite(gt, r5, ["--reads", "3", "--points-from", "pointhead", "--conf-abs", "2.0", "--content-align", "--content-ref", "first", "--fallback", "none"], bias=True)
         M5 = np.load(r5 / "maps.npz", allow_pickle=True)
         assert np.isfinite(M5["fused_maps"]).all(-1).sum() <= n_fused
         print(f"reads=3 fused |z|: camera placement {e1:.4f}  +content-align(scale) {e2:.4f}  +content-align(gt-cams) {e3:.4f}  "
               f"+content-align(sim3) {e4:.4f}   (single read {e_single:.4f})")
         assert e2 < 0.25 * e1 and e2 < 0.005 and e3 < 0.005 and e4 < 0.25 * e1, (e1, e2, e3, e4)
+        # v127: two reads, the second failing grossly (x1.3 depth) on the left half of every image.
+        # With 2 witnesses nothing reaches m=2 where they differ: modest disagreement (the 2 % bias
+        # right half) -> median fallback keeps the pixel; gross disagreement (left half) -> abstained.
+        g1 = pathlib.Path(tmp) / "gross_abstain"
+        run_suite(gt, g1, ["--reads", "2", "--points-from", "pointhead", "--conf-abs", "2.0", "--fallback", "median"], bias=True, gross=True)
+        Mg = np.load(g1 / "maps.npz", allow_pickle=True); fm = Mg["fused_maps"]
+        left, right = np.isfinite(fm[:, :, : fm.shape[2] // 2]).all(-1).mean(), np.isfinite(fm[:, :, fm.shape[2] // 2:]).all(-1).mean()
+        print(f"abstention: finite fraction left (gross) {left:.2f}  right (modest) {right:.2f}")
+        assert left < 0.15 and right > 0.9, (left, right)
+        g2 = pathlib.Path(tmp) / "gross_noabstain"
+        run_suite(gt, g2, ["--reads", "2", "--points-from", "pointhead", "--conf-abs", "2.0", "--fallback", "median", "--abstain-rel", "0"], bias=True, gross=True)
+        fm2 = np.load(g2 / "maps.npz", allow_pickle=True)["fused_maps"]
+        assert np.isfinite(fm2).all(-1).mean() > 0.9, "abstain-rel 0 must never abstain"
         M = np.load(geo / "maps.npz", allow_pickle=True)
         assert M["single_maps"].shape == (8, 48, 64, 3) and M["fused_maps"].shape[0] == 8
         assert list(M["view_ids_in_gt"]) == list(range(8))
