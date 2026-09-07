@@ -554,15 +554,36 @@ def real(a):
     fused = np.concatenate([p for p in fused_v.values()])
     print(f"consensus gate: max({a.tau_m} m, {a.tau_rel} x depth)")
     out = pathlib.Path(a.out_dir); out.mkdir(parents=True, exist_ok=True)
-    for name, P in (("single", single), ("fused", fused)):
-        P = P[np.isfinite(P).all(-1)].astype(np.float32)
-        # v134: binary little-endian PLY (float32 xyz): ~10x faster to write and read than
-        # ASCII at 5-10 M points; dtu_eval.py reads both (with or without plyfile).
+    # v153: per-point colours for figures. Points of view v are the depth-grid pixels in mgrid[0:H:stride, 0:W:stride]
+    # order (see unproject); the image is put on the same grid (resize width, centre-crop height -- the backbones'
+    # preprocessing) and sampled with the same stride. Colours are per view, identical for every context.
+    def view_colours(v):
+        from PIL import Image
+        Hd, Wd = outs[0][1].depth[list(outs[0][0]).index(v)].shape if v in outs[0][0] else outs[0][1].depth[0].shape
+        im = Image.open(paths[v]).convert("RGB"); W0, H0 = im.size
+        im = im.resize((Wd, max(Hd, int(round(H0 * Wd / W0)))), Image.BILINEAR)
+        top = (im.size[1] - Hd) // 2
+        arr = np.asarray(im)[top:top + Hd][::a.stride, ::a.stride].reshape(-1, 3)
+        return arr
+    try:
+        cols_v = {v: view_colours(v) for v in ctx_pts[0]}
+        single_c = np.concatenate([cols_v[v] for v in ctx_pts[0]]); fused_c = np.concatenate([cols_v[v] for v in fused_v])
+        assert len(single_c) == len(single) and len(fused_c) == len(fused)
+    except Exception as ex:                                   # colours are a courtesy for figures, never a failure
+        print(f"[ply] colours unavailable ({type(ex).__name__}: {ex}); writing xyz only"); single_c = fused_c = None
+    for name, P, Cc in (("single", single, single_c), ("fused", fused, fused_c)):
+        ok = np.isfinite(P).all(-1); P = P[ok].astype(np.float32); Cc = Cc[ok] if Cc is not None else None
+        # v134: binary little-endian PLY (float32 xyz [+ uchar rgb]); dtu_eval.py reads both (with or without plyfile).
         with open(out / f"{name}.ply", "wb") as f:
-            f.write(("ply\nformat binary_little_endian 1.0\nelement vertex %d\n"
-                     "property float x\nproperty float y\nproperty float z\nend_header\n" % len(P)).encode())
-            P.astype("<f4").tofile(f)
-        print(f"{name}: {len(P):,} pts -> {out/f'{name}.ply'}")
+            props = "property float x\nproperty float y\nproperty float z\n" + ("property uchar red\nproperty uchar green\nproperty uchar blue\n" if Cc is not None else "")
+            f.write(("ply\nformat binary_little_endian 1.0\nelement vertex %d\n%send_header\n" % (len(P), props)).encode())
+            if Cc is None:
+                P.astype("<f4").tofile(f)
+            else:
+                rec = np.empty(len(P), dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("r", "u1"), ("g", "u1"), ("b", "u1")])
+                rec["x"], rec["y"], rec["z"] = P[:, 0], P[:, 1], P[:, 2]; rec["r"], rec["g"], rec["b"] = Cc[:, 0], Cc[:, 1], Cc[:, 2]
+                rec.tofile(f)
+        print(f"{name}: {len(P):,} pts{' + rgb' if Cc is not None else ''} -> {out/f'{name}.ply'}")
     json.dump({**vars(a), "n_views_used": V, "view_ids_in_gt": sel_ids},
               open(out / "run.json", "w"), indent=1)
     if a.save_maps:

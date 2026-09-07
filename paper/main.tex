@@ -55,7 +55,8 @@ implementation serves six frozen and two streaming backbones. It recovers
 most of the accuracy lost to window seams at $200$ frames (VGGT
 $90.0\!\to\!93.7$ AUC@30 on CO3Dv2), improves a single pass from within by
 reading repeated writes (DTU $0.441\!\to\!0.396$\,mm, better on every
-scan), restores the $200$-frame regime to streaming models whose native
+scan; novel views through a fixed rendering head ${+}0.24$\,dB), restores the
+$200$-frame regime to streaming models whose native
 memory cannot allocate it, and turns a frozen backbone into a training-free
 SLAM system that outperforms dedicated pipelines on 7-Scenes ($0.029$\,m).
 \end{abstract}
@@ -153,12 +154,10 @@ scale}---that best maps shared-frame poses onto each other:
 \end{equation}
 solved closed-form \citep{umeyama,horn} inside a robust loop with a scale
 gate (App.~\ref{app:sim3}). Every $\hat S$ carries a small error; their
-composition is a walk whose variance grows along the chain. Split any
-long-input pairwise metric by pair type and the bleed localizes:
-\emph{within-window} pairs are the backbone's own judgment and stay at its
-single-window quality; \emph{cross-window} pairs inherit the walk, and at
-$N$ frames they are $O(1{-}W/N)$ of all pairs. Long-input accuracy is decided
-almost entirely by the pairs no forward pass ever judged.
+composition is a walk whose variance grows along the chain. Split a long-input pairwise metric by pair type and the bleed localizes:
+\emph{within-window} pairs are the backbone's own judgment; \emph{cross-window}
+pairs inherit the walk and are $O(1{-}W/N)$ of all pairs at $N$ frames.
+Long-input accuracy is decided by the pairs no forward pass ever judged.
 
 \textbf{Streaming models: write-once memory, paid for in VRAM.} Causal
 models fold the past into a state the present attends to
@@ -174,10 +173,9 @@ quadratically. On a 46\,GB GPU we measure the walls (Fig.~\ref{fig:results}c,
 App.~\ref{app:compute}): StreamVGGT completes $100$-frame sequences and
 exhausts memory at $200$; STream3R's mask allocation alone requests
 ${\sim}9$\,GB beyond capacity at $50$ CO3D frames and $281$\,GB at $200$.
-The wall is not peculiar to streaming---single-pass inference at $200$ frames
-also exhausts the same GPU for $\pi^3$ and approaches it for VGGT---so
-windowing at scale is a necessity for every architecture, and the open
-question is only whether it must cost accuracy.
+The wall is not peculiar to streaming (single-pass $\pi^3$ exhausts the same
+GPU at $200$ frames), so windowing at scale is a necessity for every
+architecture; the open question is whether it must cost accuracy.
 
 \textbf{What classical and biological memory offer.} Loop-closure
 detection, pose graphs, and surfel maps are the spine of classical SLAM
@@ -345,9 +343,7 @@ only the content read can act. \emph{SLAM} (Sec.~\ref{sec:results-slam})
 runs the streaming memory as an online system against dedicated pipelines,
 including the persistence test no implicit memory can enter. \emph{Novel view
 synthesis} (Sec.~\ref{sec:nvs}) asks whether corrected geometry renders
-better through one shared, lightly trained head. Streaming backbones pass
-through the same machinery unchanged; the composition of their token memory
-with the bank is measured, not assumed.
+better through one shared, lightly trained head.
 
 \section{Experiments}
 \label{sec:experiments}
@@ -421,10 +417,9 @@ $0.441\!\to\!0.396$\,mm on DTU (better on $23/23$ scans, landing where the
 published feed-forward number stands, which neither an independent
 reproduction \citep{langendoerfer2026vggt} nor ours could reach with a single
 pass), VGGT-$\Omega$ $0.749\!\to\!0.655$, and, on ETH3D, VGGT
-$0.490\!\to\!0.437$\,m with Accuracy nearly halved ($0.415\!\to\!0.274$). The
-mechanism is visible in what the read declines to do: where the orderings of
-a failing pass disagree, the corroborated read abstains rather than average a
-failure, and abstention is what repairs the failure scenes. The streaming
+$0.490\!\to\!0.437$\,m with Accuracy nearly halved ($0.415\!\to\!0.274$). Where the orderings of a failing pass disagree, the corroborated read abstains
+rather than average a failure, and abstention is what repairs the failure
+scenes. The streaming
 backbones, whose native passes are order-dependent too, gain on DTU
 (STream3R $1.71\!\to\!1.22$, StreamVGGT $2.89\!\to\!2.25$); for
 order-invariant backbones---$\pi^3$ by permutation equivariance, DUSt3R and
@@ -501,23 +496,30 @@ VGGT-SLAM SL(4), $w{=}32$~\cite{vggtslam} & 0.036 & 0.028 & 0.018 & 0.103 & 0.13
 
 \subsection{Novel view synthesis: does corrected geometry render better?}
 \label{sec:nvs}
-The last evaluation asks whether the memory's geometry is worth rendering.
-We follow the object protocol of LVSM \citep{lvsm} used by VGGT
-\citep{vggt}: four input views of an object, ten target views, PSNR, SSIM and
-LPIPS on GSO \citep{gso}. None of the renders behind the published rows is
-public, so we render both the training objects and GSO ourselves under one
-stated camera protocol (App.~\ref{app:nvs}), train one light per-pixel
-Gaussian head per backbone \citep{kerbl3dgs,splatt3r} on the frozen
-backbone's point maps and images---${\approx}20$K Objaverse-LVIS objects
-\citep{objaverse}, about $3\%$ of Objaverse where VGGT's internal set was
-$20\%$---and keep the head fixed across the rows of a backbone. The read
-changes only the geometry the head receives; the published rows anchor the
-scale of the task and are not directly comparable to ours
-(Table~\ref{tab:nvs}).
-% Fill Table~\ref{tab:nvs} from experiments/eval_gso.py; then state here:
-% (i) raw vs +SMR read PSNR/SSIM/LPIPS for VGGT (prediction P43: +0.3-1.0 dB),
-% (ii) the identity rows for pi3/MASt3R, (iii) where the absolute numbers land
-% relative to the anchors and why (frozen backbone, light head, 3% of the data).
+The last evaluation asks whether the memory's geometry is worth rendering,
+under the object protocol of LVSM \citep{lvsm} used by VGGT \citep{vggt}:
+four input views, ten targets, PSNR/SSIM/LPIPS on GSO \citep{gso}. No renders
+behind the published rows are public, so we render training objects and GSO
+ourselves under one protocol (App.~\ref{app:nvs}), train one light per-pixel
+Gaussian head per backbone \citep{kerbl3dgs,splatt3r} on its point maps and
+images (${\approx}19$K Objaverse-LVIS objects \citep{objaverse}, $3\%$ of
+Objaverse where VGGT's internal set was $20\%$), and keep the head fixed across
+a backbone's rows: the read changes only the geometry the head receives.
+Table~\ref{tab:nvs} gives the eight rows over all 1{,}033 GSO objects. The
+absolute level is that of the method class: a Gaussian head over frozen
+geometry lands where LGM, the Gaussian-based row of VGGT's table, lands, ten dB
+below trained transformer regressors that hallucinate the surfaces four inputs
+never show; the published rows anchor the task rather than compete. Within the
+rule the memory behaves as on DTU and ETH3D. For the order-dependent
+transformers the read improves the \emph{same} head with no retraining: VGGT
+$20.71\!\to\!20.95$\,dB (${+}0.24$; $95\%$ bootstrap interval
+$[{+}0.19,{+}0.29]$; better on $69\%$ of objects; LPIPS $-5.5\%$) and
+VGGT-$\Omega$ $18.89\!\to\!19.07$ (${+}0.18$, $[{+}0.09,{+}0.26]$). For
+$\pi^3$ the read is the identity to three decimals---the pass-through, measured
+on 1{,}033 objects. For the causal STream3R the mean falls by $0.18$\,dB while
+the median object is unchanged and $52\%$ improve: a minority with
+non-commensurable causal orderings pulls the mean down, the failure seen on
+ETH3D.
 
 \input{tab_nvs}
 
@@ -529,51 +531,51 @@ scale of the task and are not directly comparable to ours
 \label{sec:limitations}
 The memory helps only where its mechanism exists: without revisits it is,
 correctly, inert (RealEstate10K), and its gains are bounded by what the
-backbone can re-measure. The in-window read presupposes commensurable
-passes; for models whose reconstruction depends on the reference frame or
-the causal order (Fast3R, StreamVGGT, STream3R on ETH3D) the orderings
-disagree and the corroborated read keeps too little, a failure we report
-rather than remove. Two-site consensus is defeated by structures that look alike \emph{and}
-agree geometrically (repetitive facades); one wrong closure survived the gate
-on a Fast3R subset.
-DUSt3R and MASt3R's pairwise alignment does not scale to long inputs and had
-to be run on subsets; DUSt3R's 49-view DTU run needed a sliding-window pair
-graph. The bank's storage grows with the scene (in cards, not VRAM); we have
-not studied forgetting, and several hyperparameters (window, overlap,
-descriptor sizes) are conventional defaults without sensitivity sweeps. Our
-NVS rows are computed on our own renders and are not comparable to published
-numbers; the head is small by design.
+backbone can re-measure. The in-window read presupposes commensurable passes;
+for models whose reconstruction depends on the reference frame or the causal
+order (Fast3R, StreamVGGT, STream3R) the orderings disagree and the read
+keeps too little or averages incompatible geometry---a failure we report
+rather than remove. Two-site consensus is defeated by structures that look
+alike \emph{and} agree geometrically (repetitive facades); one wrong closure
+survived the gate on a Fast3R subset. The bank's storage grows with the scene
+(in cards, not VRAM); we have not studied forgetting, and hyperparameters are
+conventional defaults without sweeps. Our NVS rows use our own renders and sit
+at the level of Gaussian heads over frozen geometry, ten dB below trained
+transformer regressors.
 
+\vspace{-1mm}
 \section{Conclusion}
+\vspace{-1mm}
 Geometry foundation models did not need a better eye; they needed a memory
 that can correct. We built one from a grid-cell scaffold whose dynamics
 settle what is internally inconsistent and are blind to what is merely
-elsewhere, and we completed it with the only measurement instrument these
-models leave us---themselves. The result is gradient-free, backbone-agnostic,
-bit-identical to the model within its window, and, beyond the window,
-recovers most of what seams destroy, improves a single pass by reading
-repeated writes, gives streaming models the long regime their caches cannot
-afford, and runs as a SLAM system that outperforms dedicated ones. What
-remains is the memory's own biology---consolidation and forgetting---and the
-question of whether a scaffold trained nowhere can, given the right
-measurements, remember anywhere.
+elsewhere, and completed it with the only instrument these models leave
+us---themselves. The result is gradient-free, backbone-agnostic, bit-identical
+to the model within its window, and beyond it recovers most of what seams
+destroy, improves a single pass by reading repeated writes, gives streaming
+models the long regime their caches cannot afford, and runs as a SLAM system
+that outperforms dedicated ones. What remains is the memory's own biology:
+consolidation, forgetting, and whether a scaffold trained nowhere can, given
+the right measurements, remember anywhere.
 
+\vspace{-3mm}
 \subsubsection*{Reproducibility statement}
-Every hyperparameter is listed with its value and motivation in
-App.~\ref{app:repro} (Table~\ref{tab:hparams}); one setting serves all tasks
-and backbones. Protocols are stated per benchmark (Secs.~\ref{sec:results-pose}--\ref{sec:nvs},
-App.~\ref{app:policies}, App.~\ref{app:nvs}). Backbones use public weights
-and preprocessing unmodified; all randomness is seeded; every run writes a
-JSON report with per-sequence metrics, accepted and rejected closures with
-residuals, and solver diagnostics. Code, configurations, rendering and report
-scripts will be released.
+\vspace{-1mm}
+All hyperparameters, one setting for every task and backbone, are listed
+with their motivation in App.~\ref{app:repro} (Table~\ref{tab:hparams});
+protocols are stated per benchmark (Secs.~\ref{sec:results-pose}--\ref{sec:nvs},
+Apps.~\ref{app:policies},~\ref{app:nvs}). Backbones use public weights
+unmodified, randomness is seeded, and every run writes a JSON report (metrics,
+accepted and rejected closures with residuals, solver diagnostics). Code,
+configurations, rendering and report scripts will be released.
 
+\vspace{-3mm}
 \subsubsection*{Ethics statement}
-This work uses publicly available benchmark imagery (CO3Dv2, RealEstate10K,
-DTU, ETH3D, 7-Scenes, Objaverse, GSO) under its licenses and collects no new
-data involving people. A persistent geometric memory of places is dual-use:
-the substrate of mapping and robotics, it could also support surveillance;
-the memory stores scene geometry and appearance descriptors, not identities.
+\vspace{-1mm}
+Only public benchmark imagery is used (CO3Dv2, RealEstate10K, DTU, ETH3D,
+7-Scenes, Objaverse, GSO), under its licenses; no data involving people is
+collected. A persistent memory of places is dual-use (mapping, but also
+surveillance); it stores geometry and appearance, not identities.
 
 \bibliography{references}
 \bibliographystyle{iclr2027_conference}

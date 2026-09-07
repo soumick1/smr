@@ -37,6 +37,8 @@ def main():
     ap.add_argument("--json", default=None); ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--n-in", type=int, default=4)
     ap.add_argument("--backbone-kw", action="append", default=[])
+    ap.add_argument("--save-images", default="", help="directory: write inputs / predictions / targets as PNG for --save-n objects")
+    ap.add_argument("--save-n", type=int, default=8)
     a = ap.parse_args()
     if a.summary is not None:
         return summarize(a.summary)
@@ -82,6 +84,16 @@ def main():
                 gt = torch.from_numpy(d["rgb"][tgt_ids]).to(device).permute(0, 3, 1, 2)
                 rec = dict(id=o.name, reads=a.reads, psnr=psnr(pred, gt).mean().item(), ssim=ssim(pred, gt).item(),
                            lpips=perc(pred, gt).item(), n_gauss=int(g["means"].shape[0]), scales=[float(s) for s in geo["scales"]])
+                if a.save_images and k < a.save_n:
+                    from PIL import Image
+                    sd = pathlib.Path(a.save_images) / o.name; sd.mkdir(parents=True, exist_ok=True)
+                    to8 = lambda t: (t.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")
+                    for j, i in enumerate(in_ids):
+                        Image.fromarray((d["rgb"][i] * 255).astype("uint8")).save(sd / f"input_{j}.png")
+                    for j in range(pred.shape[0]):
+                        Image.fromarray(to8(pred[j])).save(sd / f"pred_reads{a.reads}_{j}.png")
+                        Image.fromarray(to8(gt[j])).save(sd / f"gt_{j}.png")
+                    (sd / f"metrics_reads{a.reads}.json").write_text(json.dumps(dict(psnr=rec["psnr"], ssim=rec["ssim"], lpips=rec["lpips"])))
             except Exception as ex:
                 rec = dict(id=o.name, reads=a.reads, error=f"{type(ex).__name__}: {ex}")
             f.write(json.dumps(rec) + "\n"); f.flush()
