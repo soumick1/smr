@@ -91,6 +91,14 @@ If needed read the ENTIRE paper incl. supplementary for eval details.
 ## SMOKE TEST PASSED (0.4 s/step; untrained baseline 18.55 dB). v147: rows = vggt_omega/vggt/pi3/stream3r x
 ## {raw,+SMR}; train_all.sh queues 4 heads on 3 GPUs; eval_all.sh reads 1 and 4 for all. Predictions P43,P47,P48,P52-54.
 
+## v166: ABLATIONS DONE -> App. L Tables 8-9; scoreboard 26.5/61. K=8 orderings give +1.07 dB (vs +0.27 at K=4):
+## recommended to re-run Table 3 + held-out with READS=8 (~3 h on 3 GPUs) -- user's decision.
+## v165: ablation runners scripts/ablate_all.sh (15 policy variants, cached passes) + ablate_table.py ->
+## paper/tab_ablation.tex; scripts/nvs/ablate_read.sh (reads 1/2/4/8, no-align, abstain). Predictions P59-P65.
+## v162-164: Table 3 has Objaverse-LVIS HELD-OUT (174 objs, eval_gso --val-only) + GSO column groups, both filled:
+## held-out raw->read: VGGT 22.79->22.88, VGGT-Omega 20.84->20.89, pi3 22.20->22.19, STream3R 21.15->21.07.
+## Figures: fig_recon.py (reprojection colours, image frusta, --sweep, --windows overlay, 600 dpi); user composed the
+## pumpkin SLAM figure (a: recon+inset, b: error matrices, c: per-frame error) -- caption drafted in chat.
 ## NOTE: Table 2 (7-Scenes SLAM) source reports live in outputs2/reports/pilotA_7scenes_<scene>_seq01_<bb>_s5_c32.json
 ## (seq01, keyframe stride 5, chunk 32/overlap 16, sites 2, 200 keyframes). Dense/pose reports are in outputs/.
 ## v151: qualitative figure tooling (fig_qualitative.py, fig_recon_topdown.py, fig_nvs_strip.py, fig_all.sh).

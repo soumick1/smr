@@ -157,22 +157,23 @@ serve arbitrarily heavy content (full surfel sets) at fixed loop cost.
 \subsection{Cues, novelty, and retrieval}
 \label{app:cue}
 \paragraph{The scaffold cue.}
-The cue keying each bound state is a $448$-dimensional engineered
-descriptor: a $192$-d color thumbnail, $144$-d grey structure bands, and
-$48$-d intensity histograms, $\ell_2$-normalized per block so that
-natural magnitudes act as implicit weights. Two seemingly reasonable
-enrichments were tested and rejected by measurement: appending a depth
-channel and learning a re-weighting both \emph{reduced} retrieval on the
-held-out probe (from $97.5\%$ correct to $64.5\%$ with the depth
-channel), because both couple the cue to quantities that vary with the
-backbone and the gauge. The long-range revisit proposals of the
-stitcher use a frozen self-supervised global descriptor
-\citep{dinov2} over the same bank. We do not key memory on the
-backbone's own features for a structural reason: the cue must be
-identical across backbones for one bank to serve six models, and it must
-remain valid if the backbone is swapped; pooled backbone features remain
-a candidate replacement and will be adopted only if they match the
-engineered cue on the retrieval probe.
+The cue keying each bound state of the rendering-recall memory
+(Apps.~\ref{app:vhash} and~\ref{app:surfel}) is a $448$-dimensional
+engineered descriptor: an $8{\times}8$ colour thumbnail ($192$-d) and a
+$12{\times}12$ grey structural thumbnail ($144$-d), each mean-removed, and
+three $16$-bin per-channel intensity histograms ($48$-d, $\ell_2$-normalised
+as one block), zero-padded to $448$ and $\ell_2$-normalised as a whole. The
+blocks are deliberately \emph{not} equalised: their natural magnitudes act as
+implicit weights. Two enrichments were tried and rejected by measurement,
+per-block unit normalisation and an appended depth channel: both inject a
+component shared by ring views (depth and grey layouts repeat around a room)
+and collapsed direct relocalisation on the held-out probe from $97.5\%$ to
+$64.5\%$. The stitcher's scaffold (Sec.~\ref{sec:read}) is keyed and cued
+by a frozen self-supervised global descriptor \citep{dinov2}, because it
+must recognise a place from a new viewpoint, which the engineered cue cannot
+($0.7$ accepted closures per sequence instead of $4.1$,
+Table~\ref{tab:ablation}); keying it on pooled backbone features is measured
+in App.~\ref{app:ablations}.
 
 \paragraph{Novelty gate.}
 A view is bound only if its cue similarity to every stored card is below
@@ -557,3 +558,29 @@ accepted and rejected closures with residuals, and solver diagnostics;
 code, configurations, and the report scripts will be released.
 
 \input{downstream_appendix}
+
+\section{Ablations}
+\label{app:ablations}
+\input{tab_ablation}
+\input{tab_ablation_read}
+Tables~\ref{tab:ablation} and~\ref{tab:ablation-read} change one knob at a time from the default configuration with
+the backbone passes fixed. Five things are worth stating in words.
+\emph{The two-site consensus is the gate.} With one anchor site the memory accepts the same number of closures and
+the two revisit-rich scenes get \emph{worse than raw} (office $0.026\!\to\!0.080$\,m, pumpkin $0.077\!\to\!0.187$):
+a single site verifies a wrong closure as readily as a right one. Three sites change nothing.
+\emph{Recognition is not correction.} Proposing and verifying closures without applying them online leaves the
+trajectory at the chained value ($0.042$ vs.\ $0.045$); the batch solve then uses the same verified edges and reaches
+the default's $0.029$, so the online correction matters for the running estimate, not for the final one.
+\emph{The two descriptors are not interchangeable.} Proposing revisits from the $448$-d scaffold cue instead of the
+DINOv2 token accepts $0.7$ closures per scene instead of $4.1$ and leaves the error at raw: the engineered cue keys
+places, it does not recognise them across viewpoints.
+\emph{The scaffold is not the bottleneck at this scale.} $N_h$ from $512$ to $8192$ and tori from $16^2$ to $64^2$
+are within noise of each other at 200 keyframes.
+\emph{Window size trades seams for pass failures.} $W{=}16$ chains worse ($0.051$) and the memory recovers more
+($0.027$, $7.7$ closures per scene); $W{=}64$ chains well ($0.023$) with one closure per scene and nothing left to
+repair---but on one CO3D orbit the 64-frame pass itself fails (AUC $28$) and no read can fix a window that did not
+reconstruct, the bound stated in Sec.~\ref{sec:limitations}.
+For the in-window read (Table~\ref{tab:ablation-read}) the gain grows with the number of orderings and does not
+saturate at four: eight orderings give ${+}1.07$\,dB against the single pass on $86\%$ of objects with the same
+Gaussian count, the protocol the dense benchmarks already use (eight passes).
+

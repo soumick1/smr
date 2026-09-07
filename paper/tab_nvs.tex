@@ -1,35 +1,61 @@
-% Table: novel view synthesis on GSO (LVSM object protocol). Rows filled by experiments/eval_gso.py.
+% Objaverse held-out cells: 174 objects, eval_gso.py --val-only (Sep 7 2026)
+\newcommand{\VOr}{20.84}
+\newcommand{\VOs}{0.839}
+\newcommand{\VOl}{0.193}
+\newcommand{\VOrR}{\textbf{20.89}}
+\newcommand{\VOsR}{\textbf{0.841}}
+\newcommand{\VOlR}{\textbf{0.191}}
+\newcommand{\VGr}{22.79}
+\newcommand{\VGs}{0.863}
+\newcommand{\VGl}{0.147}
+\newcommand{\VGrR}{\textbf{22.88}}
+\newcommand{\VGsR}{0.863}
+\newcommand{\VGlR}{0.146}
+\newcommand{\PIr}{22.20}
+\newcommand{\PIs}{0.857}
+\newcommand{\PIl}{0.169}
+\newcommand{\PIrR}{22.19}
+\newcommand{\PIsR}{0.857}
+\newcommand{\PIlR}{0.169}
+\newcommand{\STr}{\textbf{21.15}}
+\newcommand{\STs}{0.836}
+\newcommand{\STl}{\textbf{0.190}}
+\newcommand{\STrR}{21.07}
+\newcommand{\STsR}{0.836}
+\newcommand{\STlR}{0.195}
 \begin{table}[t]
-\centering\scriptsize
+\centering
+\scriptsize
 \setlength{\tabcolsep}{4pt}
-\caption{\textbf{Novel view synthesis on GSO} (four input views, ten targets per object, $256^2$; PSNR$\uparrow$ /
-SSIM$\uparrow$ / LPIPS$\downarrow$ on the full image over white; all 1{,}033 objects). \emph{Top:} published rows on
-their authors' own non-public renders and Objaverse-scale training sets (VGGT-NVS: an internal ${\approx}20\%$ of
-Objaverse) --- anchors, not comparable. \emph{Bottom:} our renders (App.~\ref{app:nvs}); a frozen backbone's point
-maps placed by the known input cameras and one light per-pixel Gaussian head per backbone trained on ${\approx}19$K
-Objaverse-LVIS objects (${\approx}3\%$). raw = single pass; +\smr{} = the in-window read (four orderings, symmetric
-re-measure, consensus) through the \emph{same} head, so a row difference is a geometry difference. One window has no
-junction graph, so no +\smr{}+PGO variant exists here. Bold: the better of each pair.}
+\caption{\textbf{Novel view synthesis} (four inputs, ten targets per object, $256^2$; PSNR$\uparrow$/SSIM$\uparrow$/LPIPS$\downarrow$ on
+the full image over white). \emph{Objaverse-LVIS}: the 1\,\% of objects held out from the head's training (our renders,
+LVSM's protocol); \emph{GSO}: all 1{,}033 objects (our renders). \emph{Top:} published rows on their authors' own
+non-public renders and Objaverse-scale training sets --- anchors, not comparable. \emph{Bottom:} a frozen backbone's
+point maps placed by the known input cameras and one light Gaussian head per backbone (${\approx}19$K Objaverse-LVIS
+objects, ${\approx}3\%$). raw = single pass; +\smr{} = the in-window read through the \emph{same} head, so a row
+difference is a geometry difference. One window has no junction graph, so no +\smr{}+PGO variant exists. Bold: better of each pair (differences within $0.01$\,dB / $0.001$ are ties).}
 \label{tab:nvs}
-\begin{tabular}{@{}l c c c ccc@{}}
+\begin{tabular}{@{}l c c ccc ccc@{}}
 \toprule
-Method & known input cams & training set & res. & PSNR & SSIM & LPIPS \\
+& & & \multicolumn{3}{c}{Objaverse-LVIS (held out)} & \multicolumn{3}{c}{GSO} \\
+\cmidrule(lr){4-6}\cmidrule(lr){7-9}
+Method & known input cams & training set & PSNR & SSIM & LPIPS & PSNR & SSIM & LPIPS \\
 \midrule
-\multicolumn{7}{@{}l}{\emph{published (authors' renders; not comparable to the rows below)}} \\
-LGM~\citep{lgm} & \checkmark & Objaverse renders & 256 & 21.44 & 0.832 & 0.122 \\
-GS-LRM~\citep{gslrm} & \checkmark & Objaverse renders (730K) & 256 & 29.59 & 0.944 & 0.051 \\
-LVSM~\citep{lvsm} & \checkmark & Objaverse renders (730K) & 256 & 31.71 & 0.957 & 0.027 \\
-VGGT-NVS~\citep{vggt} & $\times$ & internal, ${\approx}20\%$ Objaverse & 224 & 30.41 & 0.949 & 0.033 \\
+\multicolumn{9}{@{}l}{\emph{published (authors' renders; not comparable to the rows below)}} \\
+LGM \citep{lgm} & \checkmark & Objaverse renders & -- & -- & -- & 21.44 & 0.832 & 0.122 \\
+GS-LRM \citep{gslrm} & \checkmark & Objaverse renders (730K) & -- & -- & -- & 29.59 & 0.944 & 0.051 \\
+LVSM \citep{lvsm} & \checkmark & Objaverse renders (730K) & -- & -- & -- & 31.71 & 0.957 & 0.027 \\
+VGGT-NVS \citep{vggt} & $\times$ & internal, ${\approx}20\%$ Objaverse & -- & -- & -- & 30.41 & 0.949 & 0.033 \\
 \midrule
-\multicolumn{7}{@{}l}{\emph{ours (our renders of GSO; ${\approx}19$K Objaverse-LVIS objects, ${\approx}3\%$; frozen backbone $+$ Gaussian head)}} \\
-VGGT-$\Omega$ (raw) & \checkmark & & 256 & 18.89 & 0.796 & 0.204 \\
-\;+\smr{} & \checkmark & & 256 & \textbf{19.07} & \textbf{0.799} & \textbf{0.200} \\
-VGGT (raw) & \checkmark & & 256 & 20.71 & 0.821 & 0.152 \\
-\;+\smr{} & \checkmark & & 256 & \textbf{20.95} & \textbf{0.823} & \textbf{0.143} \\
-$\pi^3$ (raw) & \checkmark & & 256 & 21.91 & 0.844 & 0.132 \\
-\;+\smr{} & \checkmark & & 256 & 21.91 & 0.844 & 0.132 \\
-STream3R (raw) & \checkmark & & 256 & \textbf{18.79} & \textbf{0.784} & \textbf{0.209} \\
-\;+\smr{} & \checkmark & & 256 & 18.60 & 0.781 & 0.222 \\
+\multicolumn{9}{@{}l}{\emph{ours (our renders; ${\approx}19$K Objaverse-LVIS objects, ${\approx}3\%$; frozen backbone $+$ Gaussian head)}} \\
+VGGT-$\Omega$ (raw) & \checkmark & Objaverse-LVIS (19K) & \VOr{} & \VOs{} & \VOl{} & 18.89 & 0.796 & 0.204 \\
+\;+\smr{} & \checkmark & & \VOrR{} & \VOsR{} & \VOlR{} & \textbf{19.07} & \textbf{0.799} & \textbf{0.200} \\
+VGGT (raw) & \checkmark & Objaverse-LVIS (19K) & \VGr{} & \VGs{} & \VGl{} & 20.71 & 0.821 & 0.152 \\
+\;+\smr{} & \checkmark & & \VGrR{} & \VGsR{} & \VGlR{} & \textbf{20.95} & \textbf{0.823} & \textbf{0.143} \\
+$\pi^3$ (raw) & \checkmark & Objaverse-LVIS (19K) & \PIr{} & \PIs{} & \PIl{} & 21.91 & 0.844 & 0.132 \\
+\;+\smr{} & \checkmark & & \PIrR{} & \PIsR{} & \PIlR{} & 21.91 & 0.844 & 0.132 \\
+STream3R (raw) & \checkmark & Objaverse-LVIS (19K) & \STr{} & \STs{} & \STl{} & \textbf{18.79} & \textbf{0.784} & \textbf{0.209} \\
+\;+\smr{} & \checkmark & & \STrR{} & \STsR{} & \STlR{} & 18.60 & 0.781 & 0.222 \\
 \bottomrule
 \end{tabular}
 \vspace{-3mm}

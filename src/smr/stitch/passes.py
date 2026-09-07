@@ -238,3 +238,36 @@ def dino_descriptors(paths, device="cuda", model="dinov2_vits14", size=224):
             f = m(x).float().cpu().numpy()            # (B, 384) CLS features
             out.append(f / (np.linalg.norm(f, axis=1, keepdims=True) + 1e-9))
     return np.concatenate(out)
+
+
+def feat_descriptors(paths, backbone, device="cuda", dim=448, seed=0, batch=8):
+    """Backbone-feature place descriptor: the backbone's own aggregator tokens of each view seen ALONE (a
+    single-frame pass, so the descriptor does not depend on which other frames were in the window), patch tokens
+    mean-pooled over the image, L2-normalised, then a fixed random projection to `dim` and L2 again.  Only the
+    VGGT-family wrappers expose `_model.aggregator`; anything else fails loud.  The ablation asks whether the
+    backbone's features key and cue the scaffold better than a self-supervised global descriptor (DINOv2) or the
+    engineered cue; they are also backbone-SPECIFIC, so a bank keyed this way serves one backbone only.
+    """
+    import torch
+    from vggt.utils.load_fn import load_and_preprocess_images   # same preprocessing as the wrapper's passes
+    model = getattr(backbone, "_model", None)
+    if model is None and hasattr(backbone, "_load"):          # the wrappers load lazily on their first pass
+        backbone._load(); model = getattr(backbone, "_model", None)
+    if model is None or not hasattr(model, "aggregator"):
+        raise RuntimeError(f"feat descriptors need a VGGT-family backbone with `_model.aggregator`; got {type(backbone).__name__}")
+    dtype = getattr(backbone, "_dtype", None) or (torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16)
+    out = []
+    with torch.no_grad():
+        for i in range(0, len(paths), batch):
+            images = load_and_preprocess_images(list(paths[i:i + batch])).to(device)     # (B,3,H,W)
+            with torch.amp.autocast("cuda", dtype=dtype):
+                tok_list, ps_idx = model.aggregator(images[:, None])                        # frames as B separate 1-view scenes
+            tok = tok_list[-1].float()                                                      # (B,1,T,C)
+            patches = tok[:, 0, int(ps_idx):]                                               # drop camera/register tokens
+            f = patches.mean(1).cpu().numpy()                                               # (B,C)
+            out.append(f / (np.linalg.norm(f, axis=1, keepdims=True) + 1e-9))
+    F = np.concatenate(out)
+    rng = np.random.default_rng(seed); W = rng.standard_normal((F.shape[1], dim)) / np.sqrt(F.shape[1])
+    D = F @ W
+    return D / (np.linalg.norm(D, axis=1, keepdims=True) + 1e-9)
+

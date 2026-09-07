@@ -99,7 +99,7 @@ def place_views(o, gt_c2w, K, res, source="auto"):
     return np.stack(pts), np.stack(conf), float(s)
 
 
-def predict_geometry(bb, paths, gt_c2w, K, res, reads=1, source="auto", tau_abs=0.01, fallback="median", seed=0, abstain_rel=0.0):
+def predict_geometry(bb, paths, gt_c2w, K, res, reads=1, source="auto", tau_abs=0.01, fallback="median", seed=0, abstain_rel=0.0, align=True):
     """Raw (reads=1) or read (reads>1) geometry for `paths` (the input views, GT cameras known).
     Returns dict(pts (V,res,res,3), conf (V,res,res), scales [per read], orderings)."""
     V = len(paths)
@@ -121,7 +121,8 @@ def predict_geometry(bb, paths, gt_c2w, K, res, reads=1, source="auto", tau_abs=
     from points_suite import consensus_fuse, content_align          # the memory's read (same code as DTU/ETH3D)
     ctx_pts = [{v: p[v].reshape(-1, 3) for v in range(V)} for p in per_read_pts]
     ctx_cams = [{v: np.asarray(gt_c2w[v])[:3, 3] for v in range(V)} for _ in per_read_pts]
-    ctx_pts = content_align(ctx_pts, ctx_cams, model="scale", ref="mean")
+    if align:                                                     # symmetric re-measure (ablation: --no-align skips it)
+        ctx_pts = content_align(ctx_pts, ctx_cams, model="scale", ref="mean")
     # abstain_rel=0: never abstain. On DTU/ETH3D a pixel whose witnesses contradict each other by metres is
     # dropped (a failing pass must not drag the cloud); for rendering a hole is strictly worse than the median
     # compromise, and the abstention was emptying whole views (v148 finding: -18 % Gaussians on VGGT-Omega).

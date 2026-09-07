@@ -37,6 +37,9 @@ def main():
     ap.add_argument("--json", default=None); ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--n-in", type=int, default=4)
     ap.add_argument("--backbone-kw", action="append", default=[])
+    ap.add_argument("--fallback", default="median", choices=["median", "none", "first"], help="consensus fallback (ablation)")
+    ap.add_argument("--no-align", action="store_true", help="ablation: skip the symmetric re-measure between orderings")
+    ap.add_argument("--val-only", action="store_true", help="evaluate only the trainer's held-out 1 %% split of an Objaverse root (train_nvs.is_val)")
     ap.add_argument("--save-images", default="", help="directory: write inputs / predictions / targets as PNG for --save-n objects")
     ap.add_argument("--save-n", type=int, default=8)
     a = ap.parse_args()
@@ -51,6 +54,10 @@ def main():
     objs = sorted(p.parent for p in root.glob("*/cams.json"))
     excl = set((root / "exclude.txt").read_text().split()) if (root / "exclude.txt").exists() else set()
     objs = [o for o in objs if not (o / "FAILED").exists() and o.name not in excl]
+    if a.val_only:
+        import zlib
+        objs = [o for o in objs if (zlib.crc32(o.name.encode()) % 10000) < 100]   # == train_nvs.is_val (1 %)
+        print(f"val-only: {len(objs)} held-out objects")
     if a.limit:
         objs = objs[: a.limit]
     out = pathlib.Path(a.json or f"outputs/nvs/{a.backbone}/gso_reads{a.reads}.jsonl"); out.parent.mkdir(parents=True, exist_ok=True)
@@ -72,9 +79,14 @@ def main():
             try:
                 d = G.load_views(o)
                 roles = d["roles"]
-                in_ids = np.array([i for i, r in enumerate(roles) if r == "input"][: a.n_in])
-                tgt_ids = np.array([i for i, r in enumerate(roles) if r == "target"])
-                geo = G.predict_geometry(bb, [d["paths"][i] for i in in_ids], d["c2w"][in_ids], d["K"], d["res"], reads=a.reads, source=a.source)
+                in_ids = np.array([i for i, r in enumerate(roles) if r == "input"][: a.n_in], int)
+                tgt_ids = np.array([i for i, r in enumerate(roles) if r == "target"], int)
+                if len(in_ids) < a.n_in or len(tgt_ids) == 0:       # training renders: all views are 'train'
+                    n_v = len(roles); in_ids = np.arange(a.n_in); tgt_ids = np.arange(a.n_in, min(n_v, a.n_in + 10))
+                if len(tgt_ids) == 0:
+                    raise RuntimeError(f"object has only {len(roles)} views")
+                geo = G.predict_geometry(bb, [d["paths"][i] for i in in_ids], d["c2w"][in_ids], d["K"], d["res"], reads=a.reads, source=a.source,
+                                         fallback=a.fallback, align=not a.no_align)
                 x, valid = G.head_input(d["rgb"][in_ids], geo["pts"], geo["conf"], d["alpha"][in_ids])
                 xt = torch.from_numpy(x).to(device).permute(0, 3, 1, 2)
                 g = head(xt, xt[:, 3:6], xt[:, 0:3], torch.from_numpy(valid).to(device))

@@ -22,7 +22,7 @@ if [ -z "$CO3D_DIR" ]; then step "no CO3D GT directory with npz files found unde
     for row in chained smr; do
       step "  fused cloud of $s under the $row junctions"
       skip_if outputs/points/fig_${s}_${BB}_$row/fused.ply outputs/points/fig_${s}_${BB}_$row.log python experiments/points_suite.py --gt $GT --pilot outputs/est/fig_${s}_$BB.npz --row $row --backbone $BB --w 32 --overlap 16 --k-ctx 0 --stride 1 \
-          --points-from auto --conf-abs 2.0 --fallback median --abstain-rel 0 --out-dir outputs/points/fig_${s}_${BB}_$row
+          --points-from auto --conf-abs 2.0 --fallback median --abstain-rel 0 --per-ctx --out-dir outputs/points/fig_${s}_${BB}_$row
     done
     [ -f outputs/points/fig_${s}_${BB}_chained/fused.ply ] && [ -f outputs/points/fig_${s}_${BB}_smr/fused.ply ] && \
       run outputs/figures/recon_${s}_$BB.log python scripts/fig_recon.py --est outputs/est/fig_${s}_$BB.npz --json outputs/reports/fig_${s}_$BB.json \
@@ -40,7 +40,7 @@ for s in ${SCENES:-office pumpkin}; do GT=""; for c in data/gt/7scenes_${s}_${SU
   for row in chained smr; do
     step "  fused cloud under the $row junctions"
     skip_if outputs/points/fig_${n}_$row/fused.ply outputs/points/fig_${n}_$row.log python experiments/points_suite.py --gt $GT --pilot outputs/est/fig_${n}.npz --row $row --backbone $SLAMBB --w 32 --overlap 16 --k-ctx 0 --stride 1 \
-        --points-from auto --conf-abs 2.0 --fallback median --abstain-rel 0 --out-dir outputs/points/fig_${n}_$row
+        --points-from auto --conf-abs 2.0 --fallback median --abstain-rel 0 --per-ctx --out-dir outputs/points/fig_${n}_$row
   done
   [ -f outputs/points/fig_${n}_chained/fused.ply ] && [ -f outputs/points/fig_${n}_smr/fused.ply ] && \
     run outputs/figures/recon_${n}.log python scripts/fig_recon.py --est outputs/est/fig_${n}.npz --json outputs/reports/fig_${n}.json \

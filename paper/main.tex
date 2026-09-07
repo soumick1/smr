@@ -277,13 +277,18 @@ and per-primitive appearance. The card indirection lets one scaffold serve
 arbitrarily heavy content at fixed loop cost, and per-module remap offsets
 let many scenes coexist in one memory. Binding is one-shot and
 gradient-free, gated by a bind-time novelty test calibrated against the
-similarity floor of unrelated views (App.~\ref{app:cue}). Two descriptors
-serve two roles, both frozen: a $448$-dimensional engineered cue keys the
-scaffold, and a self-supervised global descriptor \citep{dinov2} proposes
-long-range revisits. We deliberately do \emph{not} key memory on the
-backbone's own features: a plug-in memory must outlive its backbone, and a
-backbone-independent key is what lets one bank serve six models unchanged
-(cue ablations in App.~\ref{app:cue}).
+similarity floor of unrelated views (App.~\ref{app:cue}). The scaffold is content-addressable---an
+appearance descriptor cues an address and the address returns the stored
+views---so the same frozen descriptor keys and cues it. Which descriptor
+depends on what the memory is asked to recognise. For revisits across a
+scene it is a self-supervised global descriptor \citep{dinov2}, because
+recognising a place from a new viewpoint is what such descriptors are trained
+for; the $448$-dimensional engineered cue of App.~\ref{app:cue} keys the
+rendering-recall memory instead, where the cue must be computable from a raw
+frame before any backbone pass and identical across backbones. Keying on the
+backbone's own features is the natural alternative and is measured, not
+assumed (App.~\ref{app:ablations}): it ties the bank to one backbone, and a
+plug-in memory must outlive its backbone.
 
 \subsection{The read is a measurement: recognize, re-measure, verify}
 \label{sec:read}
@@ -432,7 +437,8 @@ suspiciously uniform ($0.04$\,m on every scene, including the scene every
 other model fails); its authors report possible benchmark contamination of
 the released checkpoint, and ETH3D's training scenes are this benchmark, so
 the row carries that caveat. Fusion and read policies are ablated in
-App.~\ref{app:policies}.
+App.~\ref{app:policies}, the memory's policy (sites, correction, descriptors,
+scaffold size, window size) and the read's orderings in App.~\ref{app:ablations}.
 
 \subsection{SLAM on 7-Scenes: the memory as an online system}
 \label{sec:results-slam}
@@ -508,18 +514,20 @@ a backbone's rows: the read changes only the geometry the head receives.
 Table~\ref{tab:nvs} gives the eight rows over all 1{,}033 GSO objects. The
 absolute level is that of the method class: a Gaussian head over frozen
 geometry lands where LGM, the Gaussian-based row of VGGT's table, lands, ten dB
-below trained transformer regressors that hallucinate the surfaces four inputs
-never show; the published rows anchor the task rather than compete. Within the
-rule the memory behaves as on DTU and ETH3D. For the order-dependent
+below trained transformer regressors that hallucinate what four inputs never
+show. Within the rule the memory behaves as on DTU and ETH3D. For the order-dependent
 transformers the read improves the \emph{same} head with no retraining: VGGT
 $20.71\!\to\!20.95$\,dB (${+}0.24$; $95\%$ bootstrap interval
 $[{+}0.19,{+}0.29]$; better on $69\%$ of objects; LPIPS $-5.5\%$) and
 VGGT-$\Omega$ $18.89\!\to\!19.07$ (${+}0.18$, $[{+}0.09,{+}0.26]$). For
-$\pi^3$ the read is the identity to three decimals---the pass-through, measured
-on 1{,}033 objects. For the causal STream3R the mean falls by $0.18$\,dB while
+$\pi^3$ the read is the identity to three decimals---the pass-through, measured. For the causal STream3R the mean falls by $0.18$\,dB while
 the median object is unchanged and $52\%$ improve: a minority with
 non-commensurable causal orderings pulls the mean down, the failure seen on
-ETH3D.
+ETH3D. The held-out Objaverse column repeats the ordering with smaller
+margins (VGGT ${+}0.09$, VGGT-$\Omega$ ${+}0.05$, $\pi^3$ identity,
+STream3R $-0.08$): its inputs are random training cameras rather than GSO's
+four evenly spaced views, so the orderings differ less and the read has less
+to reconcile.
 
 \input{tab_nvs}
 

@@ -188,6 +188,10 @@ def main():
     ap.add_argument("--max-points", type=int, default=8000000); ap.add_argument("--frustum-stride", type=int, default=0)
     ap.add_argument("--frustum-size", type=float, default=0.0, help="far-plane width in scene units (0 = 7%% of the scene radius)")
     ap.add_argument("--zoom", nargs=3, type=float, default=None, metavar=("X", "Y", "HALF")); ap.add_argument("--no-images", action="store_true")
+    ap.add_argument("--sweep", action="store_true", help="write <out>_sweep.png: 8 candidate viewpoints of the last row, to choose --azimuth/--elev from")
+    ap.add_argument("--windows", nargs=2, type=int, default=None, metavar=("A", "B"),
+                    help="loop-closure overlay: draw only windows A and B, each tinted in its window colour, from ctx_XX.ply files in the --ply directories (points_suite --per-ctx)")
+    ap.add_argument("--tint", type=float, default=0.55, help="weight of the window colour in the overlay (0 = texture only, 1 = flat colour)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     S = 2; W, H = a.res[0] * S, a.res[1] * S
@@ -216,7 +220,8 @@ def main():
     pal = window_palette(len(chunks))
     rng = np.random.default_rng(0)
     # camera from the FIRST row (shared by all panels)
-    P0 = rows[a.rows[0]]; xyz0, _ = read_ply(a.ply[0])
+    P0 = rows[a.rows[0]]
+    p0 = pathlib.Path(a.ply[0]); xyz0, _ = read_ply(p0 if p0.is_file() else (p0 / "fused.ply" if (p0 / "fused.ply").exists() else p0 / f"ctx_{(a.windows or [0])[0]:02d}.ply"))
     up, fwd, centre, ext, pext = scene_frame(P0, xyz0, a.keep_pct)
     side = np.cross(fwd, up); az, el = np.deg2rad(a.azimuth), np.deg2rad(a.elev)
     back = -(np.cos(az) * fwd + np.sin(az) * side)
@@ -224,6 +229,27 @@ def main():
     c2w = look_at(eye, centre, up); f = 0.5 * H / np.tan(np.deg2rad(a.fov) / 2); Kv = np.array([[f, 0, W / 2], [0, f, H / 2], [0, 0, 1.0]])
     fsize = a.frustum_size or 0.07 * ext; fstride = a.frustum_stride or max(1, n_key // 24)
     print(f"scene radius {ext:.2f} (path extent {pext:.2f}); eye at {a.dist * ext:.2f} from the centre")
+    if a.sweep:
+        row = a.rows[-1]; xyz, rgb = read_ply(a.ply[-1]); P = rows[row]
+        keep = np.linalg.norm(xyz - centre, axis=1) < a.crop * ext; xyz = xyz[keep]; rgb = rgb[keep] if rgb is not None else None
+        if len(xyz) > 800000:
+            sel = rng.choice(len(xyz), 800000, replace=False); xyz = xyz[sel]; rgb = rgb[sel] if rgb is not None else None
+        if rgb is None:
+            rgb, seen = colourize(xyz, P, a.K, a.size0, ims); xyz, rgb = xyz[seen], rgb[seen]
+        views = [(-50, 30), (0, 30), (50, 30), (100, 30), (-50, 60), (0, 60), (50, 60), (0, 80)]
+        tw, th = 620, 420; sheet = Image.new("RGB", (4 * tw + 30, 2 * th + 20), (255, 255, 255)); d = ImageDraw.Draw(sheet)
+        fnt = ImageFont.truetype("DejaVuSans.ttf", 16) if pathlib.Path("/usr/share/fonts").exists() else ImageFont.load_default()
+        for j, (azv, elv) in enumerate(views):
+            azr, elr = np.deg2rad(azv), np.deg2rad(elv); bk = -(np.cos(azr) * fwd + np.sin(azr) * side)
+            eye_v = centre + a.dist * ext * (np.cos(elr) * bk + np.sin(elr) * up); c2w_v = look_at(eye_v, centre, up)
+            fv = 0.5 * th / np.tan(np.deg2rad(a.fov) / 2); Kt = np.array([[fv, 0, tw / 2], [0, fv, th / 2], [0, 0, 1.0]])
+            arr, zb = splat(xyz, rgb, Kt, c2w_v, tw, th, 2); tile = Image.fromarray(arr)
+            td = ImageDraw.Draw(tile); ps = np.arange(0, n_key, max(1, n_key // 12))
+            draw_frusta(tile, P[ps], None, Kt, c2w_v, zb, [pal[win_of[q]] for q in ps], fsize, aspect, 1)
+            td.rectangle([4, 4, 250, 26], fill=(255, 255, 255)); td.text((8, 6), f"[{j}] --azimuth {azv} --elev {elv}", fill=(0, 0, 0), font=fnt)
+            sheet.paste(tile, (10 + (j % 4) * tw, 10 + (j // 4) * th))
+        o = pathlib.Path(a.out); o.parent.mkdir(parents=True, exist_ok=True); sheet.save(str(o) + "_sweep.png")
+        print(f"wrote {o}_sweep.png -- pick a tile and pass its --azimuth/--elev (then --zoom X Y HALF for the inset)"); return
     fs = max(12, W // 70)
     try:
         font = ImageFont.truetype("DejaVuSans.ttf", fs)
@@ -231,19 +257,33 @@ def main():
         font = ImageFont.load_default()
     panels = []
     for i, (ply, row) in enumerate(zip(a.ply, a.rows)):
-        xyz, rgb = read_ply(ply); P = rows[row]
+        P = rows[row]
+        if a.windows:
+            d = pathlib.Path(ply); d = d if d.is_dir() else d.parent
+            parts = []
+            for wk in a.windows:
+                xk, ck = read_ply(d / f"ctx_{wk:02d}.ply"); parts.append((xk, ck, wk))
+            xyz = np.concatenate([x for x, _, _ in parts]); rgb = None
+            wid = np.concatenate([np.full(len(x), wk) for x, _, wk in parts])
+        else:
+            xyz, rgb = read_ply(ply); wid = None
         keep = np.linalg.norm(xyz - centre, axis=1) < a.crop * ext
-        xyz = xyz[keep]; rgb = rgb[keep] if rgb is not None else None
+        xyz = xyz[keep]; rgb = rgb[keep] if rgb is not None else None; wid = wid[keep] if wid is not None else None
         if len(xyz) > a.max_points:
-            sel = rng.choice(len(xyz), a.max_points, replace=False); xyz = xyz[sel]; rgb = rgb[sel] if rgb is not None else None
+            sel = rng.choice(len(xyz), a.max_points, replace=False); xyz = xyz[sel]; rgb = rgb[sel] if rgb is not None else None; wid = wid[sel] if wid is not None else None
         if rgb is None:
             if ims is None:
                 raise SystemExit("PLY has no colours and no images are available (--thumbs or est kpaths)")
-            rgb, seen = colourize(xyz, P, a.K, a.size0, ims); xyz, rgb = xyz[seen], rgb[seen]
+            rgb, seen = colourize(xyz, P, a.K, a.size0, ims); xyz, rgb = xyz[seen], rgb[seen]; wid = wid[seen] if wid is not None else None
             print(f"{row}: coloured {seen.sum():,}/{len(seen):,} points by reprojection")
+        if wid is not None:                                           # tint each window with its colour
+            tintc = np.array([pal[int(w)] for w in wid], float)
+            rgb = np.clip((1 - a.tint) * rgb.astype(float) + a.tint * tintc, 0, 255).astype(np.uint8)
         img_arr, zbuf = splat(xyz, rgb, Kv, c2w, W, H, radius)
         img = Image.fromarray(img_arr)
         sel = np.arange(0, n_key, fstride)
+        if a.windows:
+            sel = np.array([j for j in range(n_key) if win_of[j] in a.windows])[::max(1, fstride // 2)]
         draw_frusta(img, P[sel], None if a.no_images or ims is None else [ims[j] for j in sel], Kv, c2w, zbuf, [pal[win_of[j]] for j in sel], fsize, aspect, max(2, W // 1300))
         d = ImageDraw.Draw(img)
         for anchor, cur in closure_links(report, chunks, row):

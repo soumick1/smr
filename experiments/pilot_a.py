@@ -62,7 +62,7 @@ def load_inputs(a):
                     metric=False)
         runner = w.runner(noise=a.chunk_noise, distortion=a.chunk_distortion,
                           seed=a.seed + 1)
-        return None, w.gt, (lambda key: w.descriptors[key]), runner, meta
+        return None, w.gt, (lambda key, runner=None: w.descriptors[key]), runner, meta
     if not a.gt:
         raise SystemExit("pass --gt (from scripts/indoor_gt_poses.py or "
                          "scripts/co3d_gt_poses.py)")
@@ -82,7 +82,7 @@ def load_inputs(a):
     else:
         runner = None                      # built after keyframing (paths)
 
-    def desc_fn(key):
+    def desc_fn(key, runner=None):
         cache = (pathlib.Path(a.cache).with_suffix(f".desc_{a.descriptor}.npy")
                  if a.cache else None)
         sel = [paths[i] for i in key]
@@ -94,6 +94,12 @@ def load_inputs(a):
         if a.descriptor == "dino":
             from smr.stitch.passes import dino_descriptors
             desc = dino_descriptors(sel, device=a.device)
+        elif a.descriptor == "feat":
+            from smr.stitch.passes import feat_descriptors
+            bb = getattr(runner, "backbone", None) or getattr(runner, "bb", None)
+            if bb is None:
+                raise SystemExit("--descriptor feat needs the backbone runner (real backbone), built before descriptors")
+            desc = feat_descriptors(sel, bb, device=a.device)
         else:
             desc = image_descriptors(sel)
         if cache is not None:
@@ -174,7 +180,7 @@ def main():
     ap.add_argument("--remeasure", action="store_true",
                     help="verify each site with a 4-frame second pass "
                          "(ablation; off by default, see notes)")
-    ap.add_argument("--descriptor", default=None, choices=["rgb", "dino"],
+    ap.add_argument("--descriptor", default=None, choices=["rgb", "dino", "feat"],
                     help="place descriptor: DINOv2 ViT-S/14 CLS (default for "
                          "real backbones; pooled RGB found 1 closure in 34 "
                          "chunks where DINO found 10) or pooled RGB (no "
@@ -257,7 +263,7 @@ def main():
         a.cache = str(ROOT / "outputs" / "cache" /
                       f"{meta['scene']}_{a.backbone}_s{a.keyframe_stride}.npy")
     cache = PassCache(a.cache if not simulated else None)
-    descriptors = desc_fn(key)
+    descriptors = desc_fn(key, runner=runner)
 
     print(f"scene {meta['scene']} ({meta['dataset']}) | {len(key)} keyframes "
           f"(every {a.keyframe_stride} of {len(gt_full)}) | {len(chunks)} "

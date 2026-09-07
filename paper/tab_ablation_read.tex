@@ -1,0 +1,22 @@
+\begin{table}[t]
+\centering\scriptsize\setlength{\tabcolsep}{5pt}
+\caption{\textbf{Ablations of the in-window read} (NVS, VGGT head, the first 299 GSO objects, same objects in every row;
+$\Delta$PSNR is paired against the single pass with a 95\,\% bootstrap interval). Orderings are the identity plus random
+permutations of the four inputs. The consensus keeps the same number of Gaussians in every row (76.7K): the gain is
+geometric. The symmetric re-measure is redundant here because the input cameras are known (placement is fixed by them);
+it matters on DTU/ETH3D, where the cameras come from the backbone. Abstaining instead of taking the median punches holes
+in the render (the failure of Sec.~\ref{sec:nvs}'s first pass, kept as a row).}
+\label{tab:ablation-read}
+\begin{tabular}{@{}l ccc c c@{}}
+\toprule
+Read & PSNR$\uparrow$ & SSIM$\uparrow$ & LPIPS$\downarrow$ & $\Delta$PSNR vs.\ single pass & objects improved \\
+\midrule
+single pass (raw) & 20.33 & 0.819 & 0.159 & -- & -- \\
+2 orderings & 20.59 & 0.821 & 0.151 & ${+}0.26$ $[{+}0.15,{+}0.36]$ & 69\,\% \\
+4 orderings (Table~\ref{tab:nvs}) & 20.60 & 0.821 & 0.151 & ${+}0.27$ $[{+}0.16,{+}0.37]$ & 68\,\% \\
+8 orderings & \textbf{21.40} & \textbf{0.837} & \textbf{0.136} & $\mathbf{{+}1.07}$ $[{+}0.94,{+}1.21]$ & 86\,\% \\
+4 orderings, no symmetric re-measure & 20.64 & 0.822 & 0.150 & ${+}0.31$ $[{+}0.22,{+}0.40]$ & 69\,\% \\
+4 orderings, abstain instead of median & 18.41 & 0.818 & 0.185 & $-1.92$ & -- \\
+\bottomrule
+\end{tabular}
+\end{table}

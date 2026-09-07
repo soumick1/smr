@@ -571,6 +571,13 @@ def real(a):
         assert len(single_c) == len(single) and len(fused_c) == len(fused)
     except Exception as ex:                                   # colours are a courtesy for figures, never a failure
         print(f"[ply] colours unavailable ({type(ex).__name__}: {ex}); writing xyz only"); single_c = fused_c = None
+    if a.per_ctx:
+        for k, c in enumerate(ctx_pts):
+            Pk = np.concatenate([p for p in c.values()]); Pk = Pk[np.isfinite(Pk).all(-1)].astype(np.float32)
+            with open(out / f"ctx_{k:02d}.ply", "wb") as f:
+                f.write(("ply\nformat binary_little_endian 1.0\nelement vertex %d\nproperty float x\nproperty float y\nproperty float z\nend_header\n" % len(Pk)).encode())
+                Pk.astype("<f4").tofile(f)
+        print(f"per-context clouds: {len(ctx_pts)} files ctx_XX.ply -> {out}")
     for name, P, Cc in (("single", single, single_c), ("fused", fused, fused_c)):
         ok = np.isfinite(P).all(-1); P = P[ok].astype(np.float32); Cc = Cc[ok] if Cc is not None else None
         # v134: binary little-endian PLY (float32 xyz [+ uchar rgb]); dtu_eval.py reads both (with or without plyfile).
@@ -650,6 +657,7 @@ def build_parser():
     # v123: downstream matrix -- place the passes under a pose-pipeline row (pilot_a.py --save-est)
     ap.add_argument("--pilot", default="", help="npz from experiments/pilot_a.py --save-est")
     ap.add_argument("--row", default="smr", help="row of the pilot npz to place the passes under (chained|smr|smr_pgo|...)")
+    ap.add_argument("--per-ctx", action="store_true", help="also write each context's (window's) points as ctx_XX.ply (figures)")
     # v124: in-window memory operations
     ap.add_argument("--reads", type=int, default=1, help="K reads of the same view set (rotated orderings), fused by consensus")
     ap.add_argument("--content-align", action="store_true",

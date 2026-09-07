@@ -1,0 +1,16 @@
+\begin{table}[t]
+\centering\scriptsize\setlength{\tabcolsep}{4pt}
+\caption{placeholder}
+\label{tab:ablation-key}
+\begin{tabular}{@{}l ccc c ccc@{}}
+\toprule
+& \multicolumn{4}{c}{7-Scenes ATE (m)$\downarrow$} & \multicolumn{3}{c}{CO3D AUC@30$\uparrow$} \\
+\cmidrule(lr){2-5}\cmidrule(lr){6-8}
+Variant & raw & +\smr{} & +\smr{}+PGO & loops & raw & +\smr{} & +\smr{}+PGO \\
+\midrule
+scaffold keyed and cued by DINOv2 (default) & 0.063 & 0.060 & 0.060 & 4.0 & 88.8 & 93.4 & 93.1 \\
+scaffold keyed and cued by the engineered RGB cue & 0.063 & 0.061 & 0.061 & 0.7 & 88.8 & 91.4 & 91.5 \\
+scaffold keyed and cued by pooled VGGT features & 0.063 & 0.062 & 0.062 & 2.9 & 88.8 & 91.2 & 91.2 \\
+\bottomrule
+\end{tabular}
+\end{table}
