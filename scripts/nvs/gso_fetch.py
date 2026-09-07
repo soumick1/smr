@@ -33,28 +33,38 @@ def get(url, binary=False, timeout=120):
 
 
 def list_models():
+    """Union of every listing route that answers (the collection search returned 299 of GSO's 1,030 models on
+    the first try; the owner route may hold the rest).  Prints per-route counts."""
     routes = [
-        lambda p: f"{BASE}/models?page={p}&per_page=100&q={Q('collections:' + a.collection)}",
-        lambda p: f"{BASE}/{a.owner}/collections/{Q(a.collection)}/models?page={p}&per_page=100",
-        lambda p: f"{BASE}/{a.owner}/models?page={p}&per_page=100",
-        lambda p: f"{BASE}/{a.owner.lower()}/models?page={p}&per_page=100",
+        ("collection search", lambda p: f"{BASE}/models?page={p}&per_page=100&q={Q('collections:' + a.collection)}"),
+        ("collection route", lambda p: f"{BASE}/{a.owner}/collections/{Q(a.collection)}/models?page={p}&per_page=100"),
+        ("owner route", lambda p: f"{BASE}/{a.owner}/models?page={p}&per_page=100"),
+        ("owner route (lower)", lambda p: f"{BASE}/{a.owner.lower()}/models?page={p}&per_page=100"),
+        ("owner search", lambda p: f"{BASE}/models?page={p}&per_page=100&q={Q('owner:' + a.owner)}"),
     ]
-    for route in routes:
+    all_names = set()
+    for label, route in routes:
+        names, page = [], 1
         try:
-            first = get(route(1))
+            while True:
+                batch = get(route(page))
+                if not isinstance(batch, list) or not batch:
+                    break
+                names += [m["name"] for m in batch if str(m.get("owner", a.owner)).lower() == a.owner.lower()]
+                page += 1
+                if len(batch) < 100 or page > 60:
+                    break
         except urllib.error.HTTPError as e:
-            print(f"  listing {route(1)} -> HTTP {e.code}"); continue
+            print(f"  {label}: HTTP {e.code}"); continue
         except Exception as e:
-            print(f"  listing {route(1)} -> {type(e).__name__}: {e}"); continue
-        if not isinstance(first, list) or not first:
-            print(f"  listing {route(1)} -> empty/unexpected response"); continue
-        names, page = [m["name"] for m in first], 2
-        while len(first) == 100:
-            first = get(route(page)); names += [m["name"] for m in first]; page += 1
-        print(f"  listing via {route(1).split('?')[0]}: {len(set(names))} models")
-        return sorted(set(names))
-    raise SystemExit("all listing routes failed; pass --names-file (one model name per line, see the collection page "
-                     "https://app.gazebosim.org/GoogleResearch/fuel/collections/Scanned%20Objects%20by%20Google%20Research)")
+            print(f"  {label}: {type(e).__name__}: {e}"); continue
+        print(f"  {label}: {len(set(names))} models (+{len(set(names) - all_names)} new)")
+        all_names |= set(names)
+    if not all_names:
+        raise SystemExit("all listing routes failed; pass --names-file (one model name per line, see the collection page "
+                         "https://app.gazebosim.org/GoogleResearch/fuel/collections/Scanned%20Objects%20by%20Google%20Research)")
+    print(f"  union: {len(all_names)} models")
+    return sorted(all_names)
 
 
 names = [l.strip() for l in open(a.names_file) if l.strip()] if a.names_file else list_models()

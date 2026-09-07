@@ -1,0 +1,584 @@
+\documentclass{article}
+\usepackage{iclr2027_conference,times}
+\input{math_commands.tex}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usetikzlibrary{calc,arrows.meta,positioning}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+
+\providecommand{\cW}{\mathcal{W}}
+\providecommand{\cA}{\mathcal{A}}
+\providecommand{\cS}{\mathcal{S}}
+\providecommand{\cN}{\mathcal{N}}
+\providecommand{\ba}{\mathbf{a}}
+\newcommand{\smr}{\textsc{SMR}}
+\newcommand{\simthree}{\mathrm{Sim}(3)}
+\newcommand{\gvec}{\mathbf{g}}
+\newcommand{\hvec}{\mathbf{h}}
+\newtheorem{proposition}{Proposition}
+
+\title{Give Geometry Models a Real Memory:\\A Neural Scaffold for Frozen 3D Foundation Models}
+
+\author{Anonymous authors\\ \texttt{under double-blind review}}
+
+\iclrfinalcopy
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Geometry foundation models are superb eyes attached to no memory. Within
+one forward pass they recover cameras and dense structure; past it, their
+estimates are glued across windows, and every glue joint leaks. Streaming
+variants move the memory into the weights---a cache of past tokens---but a
+cache cannot \emph{correct}: it cannot revise a pose once emitted, cannot
+verify that a familiar-looking place is the same place, and does not
+outlive the sequence. We identify the missing organ as an
+\emph{error-correcting memory} and build one. \smr{} adapts the grid-cell
+scaffold of Vector-HaSH to metric vision: the backbone's reference poses
+clamp activity bumps on head-direction attractor rings, bump velocities
+drive spatial grid modules, and the concatenated field activities form a
+grid code that indexes a bank of the backbone's own outputs, bound one-shot
+through fixed random projections and plastic associative weights. The
+scaffold's dynamics correct one class of error for free---states consistent
+with no location---and are, by construction, blind to the other: coherent
+drift, which describes a legitimate somewhere else. That blind class is
+exactly what geometry can fix: recognized revisits are re-measured by the
+backbone itself in one anchored pass, accepted only on two-site consensus,
+and used to re-clamp the past. The memory is gradient-free, adds a
+guaranteed floor (bit-identical to the backbone within one window), and one
+implementation serves six frozen and two streaming backbones. It recovers
+most of the accuracy lost to window seams at $200$ frames (VGGT
+$90.0\!\to\!93.7$ AUC@30 on CO3Dv2), improves a single pass from within by
+reading repeated writes (DTU $0.441\!\to\!0.396$\,mm, better on every
+scan), restores the $200$-frame regime to streaming models whose native
+memory cannot allocate it, and turns a frozen backbone into a training-free
+SLAM system that outperforms dedicated pipelines on 7-Scenes ($0.029$\,m).
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+\input{fig_system}
+Ask VGGT \citep{vggt} for the relative pose of two frames inside one window
+and you get the judgment of a foundation model. Ask it for two frames ten
+seconds apart and you are no longer asking the model at all---you are asking
+a chain of glue joints. Beyond its context window, every feed-forward
+geometry model \citep{vggt,vggtomega,pi3,dust3r,mast3r,fast3r} is deployed
+the same way: run on overlapping windows, each window's output in its own
+gauge with its own scale, consecutive windows aligned by a similarity fitted
+on a few shared frames (Fig.~\ref{fig:system}a). Each junction is nearly
+right. Composed, they are a random walk \citep{strasdat}: the error between
+frames $m$ windows apart grows with $m$, and the pairs that dominate any
+long-input metric are precisely the pairs assembled through the most joints.
+The model never became less accurate; the \emph{system around it} has no way
+to notice that frame 190 shows the same hydrant as frame 5, and no way to
+use that fact.
+
+Streaming models answer by training memory into the weights: CUT3R's
+recurrent state, StreamVGGT's and STream3R's causal token caches
+\citep{cut3r,streamvggt,stream3r}. This extends the horizon, and within it
+these models are strong. But a cache is memory without an eraser. It cannot
+\emph{revise}: poses already emitted are final, so the defining act of loop
+closure---correcting the past upon return---does not exist. It cannot
+\emph{verify}: attention is soft, so a look-alike corridor contaminates the
+state silently, leaving no residual and no record. It does not
+\emph{persist}: the cache grows with the sequence, dies with the process, and
+leaves nothing to localize against tomorrow. Window models and streaming
+models bleed from the same wound at different rates: \textbf{errors, once
+made, have nowhere to be corrected from.}
+
+Naming the wound specifies the cure. An error-correcting memory for geometry
+must (i)~\emph{recognize} that the present overlaps the past;
+(ii)~\emph{re-measure} rather than assume---recognition is fallible;
+(iii)~\emph{revise} estimates already made; (iv)~\emph{persist} across
+sequences and scenes; and (v)~\emph{never touch} what the model already does
+well inside its window. Classical SLAM built such memories for classical
+pipelines \citep{grisetti,elasticfusion}, but its instruments assume
+calibrated features and consistent scale; the outputs of frozen geometry
+models are gauge-free, scale-drifting, and covariance-less, and in our
+development every attempt to strengthen alignment with their dense
+predictions made accuracy \emph{worse} (App.~\ref{app:fusion}). The one
+trustworthy instrument left is the backbone itself.
+
+\smr{} is that memory (Fig.~\ref{fig:system}). Its skeleton comes from the
+hippocampus by way of Vector-HaSH \citep{vectorhash}: content is stored not
+by associating patterns with patterns but by binding it to states of a
+prestructured \emph{scaffold} of grid-cell modules, whose combinatorial state
+space carries the capacity. We make the scaffold metric and real: the
+backbone's reference poses clamp activity bumps on head-direction attractor
+rings; the bumps' motion drives spatial grid modules; the concatenated field
+activities form the grid code that addresses a bank holding the backbone's
+own poses, surfels, and appearance (Sec.~\ref{sec:scaffold}). The scaffold's
+associative loop \emph{settles} away any state inconsistent with being
+somewhere---and is blind to coherent drift, the state consistent with being
+somewhere \emph{else} (Prop.~\ref{prop:coherent}). That blindness is the
+design's hinge, not its flaw: the blind class is exactly what geometry can
+fix, by re-measuring recognized revisits with the backbone in a single
+anchored pass, accepting only two-site consensus, and re-clamping the past
+(Sec.~\ref{sec:read}). Dynamics and geometry divide the labor of error
+correction between them.
+
+\textbf{Contributions.} \textbf{(1)} A diagnosis: window and streaming
+geometry models fail long inputs for one shared reason, the absence of an
+error-correcting memory, from which five requirements follow.
+\textbf{(2)} The first transfer of grid-cell scaffold memory to metric 3D
+perception with the dynamics kept: real attractor fields, one-shot binding of
+a frozen model's outputs, capacity in the scaffold, and a division-of-labor
+principle---settle the incoherent, pin the coherent---stated as a
+proposition. \textbf{(3)} A verified geometric read--write loop (recognize,
+re-measure with the backbone itself, two-site consensus, re-clamp) with a
+guaranteed floor: within one window the system is bit-identical to the bare
+backbone, so the backbones' own benchmarks become our controls.
+\textbf{(4)} Breadth as evidence: one implementation and one hyperparameter
+set over six frozen and two streaming backbones, evaluated on camera pose
+versus input length, dense MVS and point maps, SLAM, and novel view
+synthesis, with every negative cell retained.
+
+\section{Where geometry models bleed, and why existing memories do not stop it}
+\label{sec:bleed}
+\textbf{Window models: seams.} A frozen backbone $f$ maps $W$ images to
+per-frame cameras and depth $(g_i,D_i)$ in the gauge of the window's first
+frame \citep{vggt}. A long sequence is covered by windows
+$\cW_1,\dots,\cW_K$ ($W{=}32$, overlap $O{=}16$ throughout), and consecutive
+windows are glued by the similarity---rotation, translation, \emph{and
+scale}---that best maps shared-frame poses onto each other:
+\begin{equation}
+\label{eq:junction}
+\hat S_{k,k+1}=\argmin_{S\in\simthree}
+\sum_{j\in\cW_k\cap\,\cW_{k+1}}\rho\big(d(S\cdot g_j^{(k+1)},\,g_j^{(k)})\big),
+\end{equation}
+solved closed-form \citep{umeyama,horn} inside a robust loop with a scale
+gate (App.~\ref{app:sim3}). Every $\hat S$ carries a small error; their
+composition is a walk whose variance grows along the chain. Split any
+long-input pairwise metric by pair type and the bleed localizes:
+\emph{within-window} pairs are the backbone's own judgment and stay at its
+single-window quality; \emph{cross-window} pairs inherit the walk, and at
+$N$ frames they are $O(1{-}W/N)$ of all pairs. Long-input accuracy is decided
+almost entirely by the pairs no forward pass ever judged.
+
+\textbf{Streaming models: write-once memory, paid for in VRAM.} Causal
+models fold the past into a state the present attends to
+\citep{cut3r,streamvggt,stream3r}. The state helps the \emph{next}
+prediction; it cannot help the previous one. On revisit the model may
+perceive the return, but its history of emitted poses stays bent; no
+mechanism lets new evidence flow backward, no gate separates genuine from
+apparent familiarity, and nothing survives the end of the stream. These are
+not training deficiencies; they are absent operations. The implicit memory
+also has a price that grows with the sequence: StreamVGGT's token cache grows
+linearly with input length and STream3R's causal attention mask
+quadratically. On a 46\,GB GPU we measure the walls (Fig.~\ref{fig:results}c,
+App.~\ref{app:compute}): StreamVGGT completes $100$-frame sequences and
+exhausts memory at $200$; STream3R's mask allocation alone requests
+${\sim}9$\,GB beyond capacity at $50$ CO3D frames and $281$\,GB at $200$.
+The wall is not peculiar to streaming---single-pass inference at $200$ frames
+also exhausts the same GPU for $\pi^3$ and approaches it for VGGT---so
+windowing at scale is a necessity for every architecture, and the open
+question is only whether it must cost accuracy.
+
+\textbf{What classical and biological memory offer.} Loop-closure
+detection, pose graphs, and surfel maps are the spine of classical SLAM
+\citep{grisetti,strasdat,elasticfusion}, and recent systems put
+foundation-model front ends on that spine
+\citep{mast3rslam,vggtslam,vistaslam,slamformer}; their instruments still
+assume a consistent measurement channel, which frozen geometry models do not
+provide, so the measurement role must pass to the backbone itself. For the
+memory's \emph{organization} we turn to Vector-HaSH \citep{vectorhash}:
+binding content to a prestructured grid-cell scaffold yields high-capacity,
+robust episodic memory, and \smr{} is, to our knowledge, its first transfer
+to metric perception---dynamics retained, cleanup kept where it is competent,
+geometric verification added where it is blind (related work:
+App.~\ref{app:related}).
+
+\section{\smr{}: a scaffold memory that corrects errors}
+\label{sec:method}
+
+\subsection{From reference poses to a grid code}
+\label{sec:scaffold}
+The memory's state is not a buffer but a small dynamical system, built from
+Amari-type neural fields with genuine bump dynamics and updated in time. The
+flow runs from the backbone's poses to a single code (Fig.~\ref{fig:system}b).
+
+\emph{Orientation first.} Each input view's reference pose (the backbone's
+output, made global by the current window placement) clamps activity bumps
+on three \emph{head-direction rings} of $256$ units (ZYX Euler). Between
+clamps, rotational velocity moves the bumps through the gate
+$R(\hat\psi,\hat\theta,\hat\phi)$---the unique gating under which ring-phase
+increments are exact differentials of camera rotation, so integrating them
+is path-independent (measured $9.3\times$ accuracy gap over alternative
+gatings; App.~\ref{app:vhash}).
+
+\emph{Position through the modules.} The bumps' translational velocity,
+rotated into the world frame by the ring readout, drives three \emph{spatial
+grid modules}. Each module is a $48{\times}48$ torus (horizontal phase) plus
+a $48$-unit ring (height), with spatial periods $\{2.4,3.2,4.0\}$ in
+normalized scene units---the smallest coprime ladder $3{:}4{:}5$, whose joint
+phase is unambiguous over a Chinese-remainder range of
+$2.4\cdot\mathrm{lcm}(3,4,5)=144$ units, beyond any benchmark scene; adding a
+module multiplies the range, so capacity in extent is additive hardware, not
+retuning.
+
+\emph{The code.} Concatenating all field activities---three toruses, three
+height rings, three head-direction rings---yields the grid code
+$\gvec\in\mathbb R^{7{,}824}$. It is \emph{content-blind} (its axes are
+$\mathrm{SE}(3)$ axes, so it can index anything) and \emph{placed, not
+integrated}: every view clamps the state at a backbone pose, so the classical
+failure of path-integration memories---drift from noisy velocity---is absent
+by construction in the binding regime.
+
+\subsection{The Vector-HaSH policy: scaffold, random projection, plastic return}
+\label{sec:policy}
+Capacity comes from the scaffold's state space, not from content--content
+association. Following Vector-HaSH, the grid code is projected through a
+\emph{fixed random} matrix to a sparse layer and returned through
+\emph{plastic associative} weights,
+\begin{equation}
+\hvec=\sigma_k(W_{gh}\,\gvec),\qquad
+\hat\gvec=\psi(W_{hg}\,\hvec),
+\end{equation}
+with $\sigma_k$ a top-$k$ threshold ($N_h{=}1024$, $k{=}64$) and $\psi$
+per-field normalization. $W_{gh}$ is never trained; $W_{hg}$ is the memory's
+plasticity---a Hebbian sum in Vector-HaSH's binary setting and, for our
+continuous field templates (where the Hebbian sum is measurably at chance),
+its continuous analogue: a ridge-regularized least-squares association formed
+once from the scaffold's own states (App.~\ref{app:vhash}). Formation visits
+states covering every module phase at spacing $\le\lambda_{\min}/6$; after
+it, every joint phase is a fixed point of the loop.
+
+The loop's power is selective, and the selectivity organizes the whole
+system. Perturb $\gvec$ and decompose the perturbation: the \emph{incoherent}
+part---module states that agree with \emph{no} location---is erased by
+settling through the loop, continuously and for free. The \emph{coherent}
+part---a shift describing some \emph{other} legitimate location---survives
+settling untouched, because to every internal check it is a perfectly valid
+state.
+\begin{proposition}[Division of labor]
+\label{prop:coherent}
+After formation, every joint phase is a fixed point of the loop
+$\gvec\mapsto\psi(W_{hg}\sigma_k(W_{gh}\gvec))$. A perturbation of a stored
+state decomposes into a coherent component, which lands on another fixed
+point and is therefore invariant under settling, and an incoherent
+component, which is not a fixed point and is contracted by settling. No
+internal dynamics can detect the coherent component; it can be corrected
+only by an external clamp. (Argument in App.~\ref{app:vhash}.)
+\end{proposition}
+\smr{} pins the coherent part twice: continuously, by clamping at every
+backbone pose; and retrospectively, by the verified closures of
+Sec.~\ref{sec:read}.
+
+\subsection{Cards, not photocopies: what gets bound}
+\label{sec:content}
+Each bound state associates the grid code with a \emph{card}: a compact
+appearance cue plus an index into a bank where the heavy content lives---the
+owning window, the frame's pose in the owner's gauge, its surfels (the
+backbone's points with color and footprint \citep{surfels,elasticfusion}),
+and per-primitive appearance. The card indirection lets one scaffold serve
+arbitrarily heavy content at fixed loop cost, and per-module remap offsets
+let many scenes coexist in one memory. Binding is one-shot and
+gradient-free, gated by a bind-time novelty test calibrated against the
+similarity floor of unrelated views (App.~\ref{app:cue}). Two descriptors
+serve two roles, both frozen: a $448$-dimensional engineered cue keys the
+scaffold, and a self-supervised global descriptor \citep{dinov2} proposes
+long-range revisits. We deliberately do \emph{not} key memory on the
+backbone's own features: a plug-in memory must outlive its backbone, and a
+backbone-independent key is what lets one bank serve six models unchanged
+(cue ablations in App.~\ref{app:cue}).
+
+\subsection{The read is a measurement: recognize, re-measure, verify}
+\label{sec:read}
+A remembered place is a hypothesis, not a constraint. When a new window's
+frames cue the memory and a match older than the revisit gap returns,
+\smr{} converts the proposal into geometry using the only instrument it
+trusts: one \emph{anchored pass} of the backbone over the current window
+plus a small remembered \emph{site} (the matched frame and a temporal
+partner). Old and new views now sit in a single forward pass, so their
+relative geometry is the model's joint judgment---no seams in between. Two
+robust fits of Eq.~\ref{eq:junction} compose the pass into a candidate
+closure $\hat Z\in\simthree$ (App.~\ref{app:closure}). One measurement is
+still not trusted: acceptance requires \emph{two independent sites} whose
+implied placements agree within scene-scaled tolerances---independent errors
+rarely agree---and every acceptance and rejection is logged with its
+residuals. Retrieval itself is two-stage for the same reason (propose
+top-$5$, verify geometrically), which in controlled tests turned $22/39$
+correct recalls into $39/39$ (App.~\ref{app:cue}).
+
+The same read applies \emph{inside} one window, where no revisit exists
+but two content-level errors do: a pass depends on the ordering of its
+frames, and its point maps carry a scale bias against its own cameras.
+Writing $K$ orderings of the same views to the same scaffold coordinates,
+re-measuring each pass's scale against the stored cards of the shared views
+(symmetric, no pass privileged), and returning the per-pixel consensus is
+the read exercised densely (Sec.~\ref{sec:mvs}).
+
+\subsection{The write-back revises the past}
+\label{sec:correct}
+Junctions and accepted closures form a pose graph over window placements
+$T_k\in\simthree$. Online, each closure triggers a causal relaxation that
+spreads the implied correction over the intervening windows in
+$O(\text{span})$: the trajectory behind the camera bends into
+consistency---the operation no write-once memory can express. At sequence
+end a single robust solve (Huber loss, explicit scale weighting, one
+outlier-rejection round \citep{huber,grisetti}) polishes the graph;
+empirically the causal rule captures most of the correction. Frames inherit
+their owner's placement, $\hat g_j=T_{k(j)}\,g_j^{(k(j))}$, which yields the
+\emph{floor}: within-window relative geometry is exactly the backbone's own;
+an input that fits one window is bit-identical to the bare model; and at any
+observed view the memory returns the backbone's output under an exact group
+action (App.~\ref{app:invariant}). The backbones' single-window benchmarks
+are therefore not competitors' turf but our control experiments.
+
+\section{Evaluation design}
+\label{sec:tasks}
+One implementation and one hyperparameter set (App.~\ref{app:repro}) serve
+every evaluation; the tasks differ only in which memory operation they
+exercise, and each is reported for every backbone as raw, +\smr{} (the causal
+memory) and +\smr{}+PGO (adding the final solve). \emph{Camera pose versus
+input length} (Sec.~\ref{sec:results-pose}) is the direct test of
+Sec.~\ref{sec:bleed}: rows coincide for $N\le W$ by the floor and separate
+as seams and revisits accumulate, and a dataset without revisits is the
+control. \emph{Dense MVS and point maps} (Sec.~\ref{sec:mvs}) exercise the
+read inside one window, where pose-level memory is inert by construction and
+only the content read can act. \emph{SLAM} (Sec.~\ref{sec:results-slam})
+runs the streaming memory as an online system against dedicated pipelines,
+including the persistence test no implicit memory can enter. \emph{Novel view
+synthesis} (Sec.~\ref{sec:nvs}) asks whether corrected geometry renders
+better through one shared, lightly trained head. Streaming backbones pass
+through the same machinery unchanged; the composition of their token memory
+with the bank is measured, not assumed.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Camera pose versus input length}
+\label{sec:results-pose}
+We evaluate under the pairwise-pose protocol of \citet{vggt}: $N$ frames of
+a sequence are given, and AUC@30 \citep{relposepp,posediffusion} scores all
+frame pairs by the maximum of relative-rotation and translation-direction
+error. We extend the protocol along its one hidden axis,
+$N\in\{10,50,100,200\}$, on CO3Dv2 ($37$ ground-truth-validated sequences;
+frames spread over each full sequence at every $N$) and RealEstate10K (the
+official test-1800 split at $N{=}10$, $1{,}653$ live clips; $100$ clips with
+${\ge}200$ frames for the length axis). Table~\ref{tab:pose} reports every
+cell; Fig.~\ref{fig:results} draws the curves.
+
+\input{tab_main}
+\input{fig_results}
+
+Three findings, each predicted by Sec.~\ref{sec:bleed}. \textbf{The floor is
+real and free.} At $N{=}10$, and at $N{=}50$ where these sequences contain no
+revisit yet, all three rows are identical for every backbone---six frozen
+models, zero degradation, the pass-through property measured rather than
+asserted. \textbf{Beyond the window, memory pays where the mechanism
+exists.} On CO3D orbits raw accuracy falls monotonically with $N$ for all six
+backbones ($-4.8$ to $-7.4$ points from $N{=}10$ to $200$), and the memory
+recovers most of the loss: $+3.9$ (VGGT), $+3.4$ ($\pi^3$), $+3.1$
+(VGGT-$\Omega$), $+2.7$ (DUSt3R), $+1.9$ (Fast3R) at $N{=}200$, with
+MASt3R---whose match-based chaining is already strong---nearly flat
+($+0.2$). The causal memory alone captures $87$--$100\%$ of each gain; the
+final solve adds at most $+0.4$. The one negative cell (Fast3R at
+$N{=}100$, $-1.6$) is retained: its noisier per-window geometry admits
+occasional wrong closures on that subset, the failure mode the consensus
+gate exists to bound. \textbf{No revisits, no effect---by design.}
+RealEstate10K clips are forward walkthroughs; accepted closures are
+${\approx}0$ throughout, and the memory correctly changes almost nothing
+($-0.4$ to $+0.3$ across all backbones and lengths). The gain tracks revisit
+availability, not tuning (Fig.~\ref{fig:results}a,b).
+
+\textbf{Streaming backbones.} Run natively on the same data, the streaming
+models confirm the memory wall: StreamVGGT matches its single-window accuracy
+up to $N{=}100$ and exhausts a 46\,GB GPU at $N{=}200$; STream3R exhausts it
+from $N{=}50$ on CO3D. Driving the same models through \smr{}---token memory
+inside each window, the bank across windows---bounds per-pass memory by the
+window and restores the $N{=}200$ regime with a gain, not a compromise:
+StreamVGGT $82.9\!\to\!85.9$ and STream3R $84.8\!\to\!87.6$ AUC@30 at
+$N{=}200$ (Table~\ref{tab:pose}), on the exact inputs where their native
+mode cannot allocate its own memory. Native accuracy also degrades with
+length below the wall (StreamVGGT RE10K $81.2\!\to\!77.7$ from $N{=}10$ to
+$100$): causal drift, once emitted, is unrevisable---while the composed
+system's curve stays flat. Tables~\ref{tab:compute} and~\ref{tab:memvsn}
+(App.~\ref{app:compute}) quantify the cost side on identical hardware: the
+memory adds one $36$-frame anchored pass per accepted closure
+($0.2$--$1.7$ per sequence) and a sub-second solve, and its GPU peak is the
+window's, constant in $N$ (Fig.~\ref{fig:results}c). Implicit memory pays
+for sequence length in VRAM; the scaffold bank pays once, in storage.
+
+\subsection{Dense MVS and point maps: the memory inside one window}
+\label{sec:mvs}
+VGGT's dense benchmarks live inside a window: all 49 DTU views fit one pass,
+and the ETH3D protocol uses ten frames, so pose-level memory is inert here by
+construction and the DTU and ETH3D columns of Table~\ref{tab:pose} isolate
+the in-window read of Sec.~\ref{sec:read}. One harness scores every row: the
+official DTU evaluator with its masks and $0.2$\,mm downsampling, a Sim(3)
+gauge chosen among three candidates by a symmetric fit criterion, each
+backbone's native point map (its point head where it has one), and ETH3D's
+official rendered depth with Umeyama alignment on per-pixel correspondences.
+The protocol rows are the backbones' own output---the floor again---and the
+read improves the order-dependent transformers from within: VGGT
+$0.441\!\to\!0.396$\,mm on DTU (better on $23/23$ scans, landing where the
+published feed-forward number stands, which neither an independent
+reproduction \citep{langendoerfer2026vggt} nor ours could reach with a single
+pass), VGGT-$\Omega$ $0.749\!\to\!0.655$, and, on ETH3D, VGGT
+$0.490\!\to\!0.437$\,m with Accuracy nearly halved ($0.415\!\to\!0.274$). The
+mechanism is visible in what the read declines to do: where the orderings of
+a failing pass disagree, the corroborated read abstains rather than average a
+failure, and abstention is what repairs the failure scenes. The streaming
+backbones, whose native passes are order-dependent too, gain on DTU
+(STream3R $1.71\!\to\!1.22$, StreamVGGT $2.89\!\to\!2.25$); for
+order-invariant backbones---$\pi^3$ by permutation equivariance, DUSt3R and
+MASt3R by global alignment---the read is the identity and the rows are equal
+by construction. Two honest cells complete the picture. The read presupposes
+commensurable passes: for Fast3R and the causal models on ETH3D, different
+orderings yield genuinely different reconstructions, the corroborated read
+keeps too little, and the row worsens. And VGGT-$\Omega$'s ETH3D cells are
+suspiciously uniform ($0.04$\,m on every scene, including the scene every
+other model fails); its authors report possible benchmark contamination of
+the released checkpoint, and ETH3D's training scenes are this benchmark, so
+the row carries that caveat. Fusion and read policies are ablated in
+App.~\ref{app:policies}.
+
+\subsection{SLAM on 7-Scenes: the memory as an online system}
+\label{sec:results-slam}
+% NOTE: averages shared with the companion SLAM-track submission; scope
+% and dual-submission framing to be confirmed before submission.
+Streaming \smr{} \emph{is} an online SLAM system, and 7-Scenes
+\citep{sevenscenes} lets us compare it, per trajectory ATE RMSE (m), against
+dedicated pipelines (Table~\ref{tab:slam}). With its strongest frozen backbone
+the memory outperforms every listed published system---$0.030$\,m streaming,
+$0.029$ with the final solve, against $0.042$--$0.086$ for dedicated
+pipelines---while remaining training-free and backbone-agnostic. The
+mechanism is the one this paper is about: chained windows alone reach
+$0.045$; verified closures and re-clamping recover a third of that error,
+most of it on the revisit-rich scenes (office $0.047\!\to\!0.026$, pumpkin
+$0.161\!\to\!0.061$). The same machinery improves the \emph{streaming}
+backbones within-session (StreamVGGT $0.133\!\to\!0.121$, STream3R
+$0.089\!\to\!0.079$), and the honest column stays in view: where a whole
+scene fits one native pass, the single pass is sometimes best---memory
+governs what happens beyond the window, not within it. Its decisive test is
+persistence: in \emph{multi-session} mapping, where the token cache dies
+between sessions and the bank does not, \smr{} reduces streaming-backbone
+error $4.6\times$ (StreamVGGT, $0.293\!\to\!0.064$) and $3.9\times$
+(STream3R, $0.337\!\to\!0.086$)---the operation implicit memory cannot
+express, measured. A companion submission develops the SLAM system itself;
+here it serves as the memory's online test.
+
+\begin{table}[t]
+\centering\scriptsize
+\setlength{\tabcolsep}{4.5pt}
+\caption{7-Scenes SLAM, ATE RMSE (m)$\downarrow$ per scene. \smr{} on a
+single frozen backbone outperforms all listed calibrated and uncalibrated
+systems on average; the largest recoveries are the revisit-rich scenes
+(office, pumpkin). Streaming-backbone and multi-session results are given in
+the text.}
+\label{tab:slam}
+\begin{tabular}{@{}l ccccccc c@{}}
+\toprule
+ & chess & fire & heads & office & pumpkin & kitchen & stairs & \textbf{avg} \\
+\midrule
+\multicolumn{9}{@{}l}{\emph{calibrated}} \\
+NICER-SLAM~\cite{nicerslam} & 0.033 & 0.069 & 0.042 & 0.108 & 0.200 & 0.039 & 0.108 & 0.086 \\
+DROID-SLAM~\cite{droidslam} & 0.036 & 0.027 & 0.025 & 0.066 & 0.127 & 0.040 & 0.026 & 0.049 \\
+MASt3R-SLAM~\cite{mast3rslam} & 0.053 & 0.025 & 0.015 & 0.097 & 0.088 & 0.041 & 0.011 & 0.047 \\
+\midrule
+\multicolumn{9}{@{}l}{\emph{uncalibrated}} \\
+VGGT-SLAM++~\cite{vggtslampp} & 0.034 & 0.023 & 0.017 & 0.104 & 0.127 & 0.085 & 0.060 & 0.064 \\
+ViSTA-SLAM~\cite{vistaslam} & 0.036 & 0.033 & 0.019 & 0.103 & 0.133 & 0.058 & 0.093 & 0.067 \\
+SLAM-Former~\cite{slamformer} & 0.039 & 0.033 & 0.018 & 0.070 & 0.065 & 0.035 & 0.033 & 0.042 \\
+CUT3R~\cite{cut3r} & 0.046 & 0.043 & 0.055 & 0.120 & 0.096 & 0.061 & 0.086 & 0.073 \\
+MASt3R-SLAM$^*$~\cite{mast3rslam} & 0.063 & 0.046 & 0.029 & 0.103 & 0.114 & 0.074 & 0.032 & 0.066 \\
+VGGT-SLAM Sim(3), $w{=}32$~\cite{vggtslam} & 0.037 & 0.026 & 0.018 & 0.104 & 0.133 & 0.061 & 0.093 & 0.067 \\
+VGGT-SLAM SL(4), $w{=}32$~\cite{vggtslam} & 0.036 & 0.028 & 0.018 & 0.103 & 0.133 & 0.058 & 0.093 & 0.067 \\
+\midrule
+\multicolumn{9}{@{}l}{\emph{VGGT-$\Omega$ (ours; uncalibrated, training-free)}} \\
+\;$w{=}32$, Sim(3) (raw) & 0.025 & 0.024 & 0.012 & 0.047 & 0.161 & 0.026 & 0.020 & 0.045 \\
+\;+\smr{} & 0.022 & 0.026 & 0.012 & 0.026 & 0.077 & 0.028 & 0.022 & \textbf{0.030} \\
+\;+\smr{}+PGO & 0.021 & 0.031 & 0.013 & 0.031 & 0.061 & 0.025 & 0.022 & \textbf{0.029} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Novel view synthesis: does corrected geometry render better?}
+\label{sec:nvs}
+The last evaluation asks whether the memory's geometry is worth rendering.
+We follow the object protocol of LVSM \citep{lvsm} used by VGGT
+\citep{vggt}: four input views of an object, ten target views, PSNR, SSIM and
+LPIPS on GSO \citep{gso}. None of the renders behind the published rows is
+public, so we render both the training objects and GSO ourselves under one
+stated camera protocol (App.~\ref{app:nvs}), train one light per-pixel
+Gaussian head per backbone \citep{kerbl3dgs,splatt3r} on the frozen
+backbone's point maps and images---${\approx}20$K Objaverse-LVIS objects
+\citep{objaverse}, about $3\%$ of Objaverse where VGGT's internal set was
+$20\%$---and keep the head fixed across the rows of a backbone. The read
+changes only the geometry the head receives; the published rows anchor the
+scale of the task and are not directly comparable to ours
+(Table~\ref{tab:nvs}).
+% Fill Table~\ref{tab:nvs} from experiments/eval_gso.py; then state here:
+% (i) raw vs +SMR read PSNR/SSIM/LPIPS for VGGT (prediction P43: +0.3-1.0 dB),
+% (ii) the identity rows for pi3/MASt3R, (iii) where the absolute numbers land
+% relative to the anchors and why (frozen backbone, light head, 3% of the data).
+
+\input{tab_nvs}
+
+% Figure 3 placeholder: qualitative NVS (inputs | raw render | +SMR render | GT), 2 objects.
+% \begin{figure}[t]\centering\includegraphics[width=\textwidth]{fig_nvs_qual.pdf}
+% \caption{...}\label{fig:nvs}\end{figure}
+
+\section{Limitations}
+\label{sec:limitations}
+The memory helps only where its mechanism exists: without revisits it is,
+correctly, inert (RealEstate10K), and its gains are bounded by what the
+backbone can re-measure. The in-window read presupposes commensurable
+passes; for models whose reconstruction depends on the reference frame or
+the causal order (Fast3R, StreamVGGT, STream3R on ETH3D) the orderings
+disagree and the corroborated read keeps too little, a failure we report
+rather than remove. Two-site consensus is defeated by structures that look alike \emph{and}
+agree geometrically (repetitive facades); one wrong closure survived the gate
+on a Fast3R subset.
+DUSt3R and MASt3R's pairwise alignment does not scale to long inputs and had
+to be run on subsets; DUSt3R's 49-view DTU run needed a sliding-window pair
+graph. The bank's storage grows with the scene (in cards, not VRAM); we have
+not studied forgetting, and several hyperparameters (window, overlap,
+descriptor sizes) are conventional defaults without sensitivity sweeps. Our
+NVS rows are computed on our own renders and are not comparable to published
+numbers; the head is small by design.
+
+\section{Conclusion}
+Geometry foundation models did not need a better eye; they needed a memory
+that can correct. We built one from a grid-cell scaffold whose dynamics
+settle what is internally inconsistent and are blind to what is merely
+elsewhere, and we completed it with the only measurement instrument these
+models leave us---themselves. The result is gradient-free, backbone-agnostic,
+bit-identical to the model within its window, and, beyond the window,
+recovers most of what seams destroy, improves a single pass by reading
+repeated writes, gives streaming models the long regime their caches cannot
+afford, and runs as a SLAM system that outperforms dedicated ones. What
+remains is the memory's own biology---consolidation and forgetting---and the
+question of whether a scaffold trained nowhere can, given the right
+measurements, remember anywhere.
+
+\subsubsection*{Reproducibility statement}
+Every hyperparameter is listed with its value and motivation in
+App.~\ref{app:repro} (Table~\ref{tab:hparams}); one setting serves all tasks
+and backbones. Protocols are stated per benchmark (Secs.~\ref{sec:results-pose}--\ref{sec:nvs},
+App.~\ref{app:policies}, App.~\ref{app:nvs}). Backbones use public weights
+and preprocessing unmodified; all randomness is seeded; every run writes a
+JSON report with per-sequence metrics, accepted and rejected closures with
+residuals, and solver diagnostics. Code, configurations, rendering and report
+scripts will be released.
+
+\subsubsection*{Ethics statement}
+This work uses publicly available benchmark imagery (CO3Dv2, RealEstate10K,
+DTU, ETH3D, 7-Scenes, Objaverse, GSO) under its licenses and collects no new
+data involving people. A persistent geometric memory of places is dual-use:
+the substrate of mapping and robotics, it could also support surveillance;
+the memory stores scene geometry and appearance descriptors, not identities.
+
+\bibliography{references}
+\bibliographystyle{iclr2027_conference}
+
+\appendix
+\input{appendix}
+
+\end{document}

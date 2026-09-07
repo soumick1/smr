@@ -1,0 +1,36 @@
+% Table: novel view synthesis on GSO (LVSM object protocol). Rows filled by experiments/eval_gso.py.
+\begin{table}[t]
+\centering\scriptsize
+\setlength{\tabcolsep}{4pt}
+\caption{\textbf{Novel view synthesis on GSO} (four input views, ten targets per object, $256^2$; PSNR$\uparrow$ /
+SSIM$\uparrow$ / LPIPS$\downarrow$ on the full image over white). \emph{Top:} published rows under their authors'
+protocols, computed on their own renders of GSO with Objaverse-scale training sets, none of them public (VGGT-NVS:
+an internal set of ${\approx}20\%$ of Objaverse); they anchor the task's scale only. \emph{Bottom:} our rows on our
+renders (App.~\ref{app:nvs}): a frozen backbone's point maps placed by the known input cameras and one light per-pixel
+Gaussian head per backbone, trained on ${\approx}19$K Objaverse-LVIS objects (${\approx}3\%$ of Objaverse). raw = the
+single pass; +\smr{} = the in-window read (four orderings, symmetric re-measure, consensus) through the \emph{same}
+head, so a row difference is a geometry difference; one window has no junction graph, so the +\smr{}+PGO variant does not exist here (it would equal +\smr{});
+for the order-invariant $\pi^3$ the read is expected to be the identity, and the row measures it.}
+\label{tab:nvs}
+\begin{tabular}{@{}l c c c ccc@{}}
+\toprule
+Method & known input cams & training set & res. & PSNR & SSIM & LPIPS \\
+\midrule
+\multicolumn{7}{@{}l}{\emph{published (authors' renders; not comparable to the rows below)}} \\
+LGM~\citep{lgm} & \checkmark & Objaverse renders & 256 & 21.44 & 0.832 & 0.122 \\
+GS-LRM~\citep{gslrm} & \checkmark & Objaverse renders (730K) & 256 & 29.59 & 0.944 & 0.051 \\
+LVSM~\citep{lvsm} & \checkmark & Objaverse renders (730K) & 256 & 31.71 & 0.957 & 0.027 \\
+VGGT-NVS~\citep{vggt} & $\times$ & internal, ${\approx}20\%$ Objaverse & 224 & 30.41 & 0.949 & 0.033 \\
+\midrule
+\multicolumn{7}{@{}l}{\emph{ours (our renders of GSO; ${\approx}19$K Objaverse-LVIS objects, ${\approx}3\%$; frozen backbone $+$ Gaussian head)}} \\
+VGGT-$\Omega$ (raw) & \checkmark & & 256 & -- & -- & -- \\
+\;+\smr{} & \checkmark & & 256 & -- & -- & -- \\
+VGGT (raw) & \checkmark & & 256 & -- & -- & -- \\
+\;+\smr{} & \checkmark & & 256 & -- & -- & -- \\
+$\pi^3$ (raw) & \checkmark & & 256 & -- & -- & -- \\
+\;+\smr{} & \checkmark & & 256 & -- & -- & -- \\
+STream3R (raw) & \checkmark & & 256 & -- & -- & -- \\
+\;+\smr{} & \checkmark & & 256 & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table}

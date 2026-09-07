@@ -7,8 +7,9 @@
 
 Protocol (smr.nvs.cameras): object normalised to a bounding sphere of radius 0.5 at the
 origin, cameras on a sphere of radius 2.0, vertical FOV 40 deg, square `--res` images,
-white world background plus one sun (direction fixed per object), Cycles GPU (OptiX/CUDA)
-with denoising, "Standard" view transform (no filmic tone curve), PNG RGB.
+white world (lighting) plus one sun (direction fixed per object), Cycles GPU (OptiX/CUDA)
+with denoising, "Standard" view transform (no filmic tone curve), PNG RGBA with a transparent film:
+alpha is the object mask, and loaders composite the colour onto white (LVSM/GS-LRM convention).
 Per object: <out>/<id>/{000.png,...} and cams.json (OpenCV c2w, y-up world) + meta.json.
 Resume-safe: objects whose cams.json exists are skipped.  Batches of --batch objects share
 one Blender session (read_factory_settings between them) to amortise start-up.
@@ -51,7 +52,7 @@ def apply_cycles_scene(bpy, samples, n_gpu):
     scene.cycles.use_denoising = True
     scene.cycles.use_adaptive_sampling = True
     scene.cycles.max_bounces = 4
-    scene.render.film_transparent = False
+    scene.render.film_transparent = True                      # background alpha 0; world still lights the object
     scene.view_settings.view_transform = "Standard"
     scene.view_settings.look = "None"
 
@@ -61,8 +62,9 @@ def setup_scene(bpy, res):
     scene.render.resolution_x = scene.render.resolution_y = res
     scene.render.resolution_percentage = 100
     scene.render.image_settings.file_format = "PNG"
-    scene.render.image_settings.color_mode = "RGB"
+    scene.render.image_settings.color_mode = "RGBA"          # alpha = object mask; loaders composite on white
     scene.render.image_settings.color_depth = "8"
+    scene.render.film_transparent = True
     # white uniform world (background + ambient)
     world = bpy.data.worlds.new("W")
     world.use_nodes = True

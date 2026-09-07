@@ -1,0 +1,559 @@
+\section{Notation and $\simthree$ operations}
+\label{app:sim3}
+A similarity $S=(s,R,t)\in\simthree$ acts on points as $S\cdot x = sRx+t$
+and on a camera-to-world pose $g=(R_g,t_g)$ as
+$S\cdot g = (R R_g,\; sRt_g + t)$: rotations compose, positions are scaled
+and moved, and the local frame's scale is absorbed into the map. We write
+$\mathrm{Log}:\simthree\to\mathbb{R}^7$ for the logarithm splitting into
+rotation angle-axis $\omega\in\mathbb{R}^3$, translation $\nu\in\mathbb{R}^3$,
+and log-scale $\sigma\in\mathbb{R}$.
+
+\paragraph{Closed-form alignment.}
+Given corresponding pose sets $\{(g_j^{A}, g_j^{B})\}_{j=1}^{n}$ (the same
+physical frames expressed in two gauges), the alignment
+$\hat S=\argmin_S \sum_j \|S\cdot c_j^{A} - c_j^{B}\|^2$ over camera
+centres $c_j$ has the closed-form solution of \citet{umeyama} (rotation by
+SVD of the centred cross-covariance with a determinant sign correction
+\citep{horn}, scale by variance ratio, translation by centroids).
+
+\paragraph{Robust IRLS wrapper.}
+Pose sets contain occasional gross errors, so we wrap the closed form in
+iteratively reweighted least squares: initialize with all pairs; at each of
+$T{=}5$ rounds compute residuals $r_j = \|\hat S\cdot c^A_j - c^B_j\|$,
+set Huber weights $w_j=\min(1, \kappa\,\tilde r/r_j)$ with $\tilde r$ the
+median residual and $\kappa{=}2.5$, and re-solve on weighted centroids.
+Rotational agreement is checked on the fitted $R$: pairs whose relative
+rotation residual exceeds $\theta_{\max}$ are dropped. The fit is declared
+valid only if (i) at least $n_{\min}{=}4$ inliers remain and (ii) the
+\emph{scale gate} passes: the ratio between the fitted scale and the
+median pairwise-distance ratio lies in $[1/\gamma_s,\gamma_s]$
+($\gamma_s{=}1.5$). Fits failing the gate are discarded rather than
+down-weighted; a wrong scale poisons everything downstream.
+
+\section{Windowed inference, junctions, and the invariant}
+\label{app:invariant}
+\paragraph{Keyframing and windows.}
+Keyframes are taken at a fixed temporal stride; windows are consecutive
+runs of $W$ keyframes overlapping by $O$ (defaults $W{=}32$, $O{=}16$;
+per-dataset strides in App.~\ref{app:repro}). Each keyframe $j$ is
+\emph{owned} by the first window covering it, $k(j)$; overlap frames thus
+belong to two windows but are owned by one, and every stored pose
+$g_j^{(k(j))}$ is expressed in its owner's gauge.
+
+\paragraph{Junction edges.}
+For consecutive windows the shared frames give correspondences for
+Eq.~\ref{eq:junction}; the resulting $\hat S_{k,k+1}$ becomes a
+\emph{sequential edge} $Z=\hat S_{k,k+1}$ between nodes $k,k{+}1$. When the
+overlap exceeds half the window, overlap frames span two previous windows;
+edges sourced from overlap frames are sequential regardless of owner
+distance (only anchor-sourced constraints are loop edges).
+
+\paragraph{Why the pass-through property holds.}
+(a) $N\le W$: one window, one node, no junction edges; the revisit gap
+$\Delta$ (measured in keyframes) excludes all frames of the same window
+from proposal, so the memory proposes nothing; the pose graph over a
+single node has the identity as optimum in any gauge convention; frames
+inherit $\hat g_j = T_1 g_j^{(1)}$ with $T_1$ the gauge anchor---the
+backbone's output up to the global frame, i.e., exactly the backbone's
+output under the benchmark's gauge-free metrics. (b) General case: \smr{}
+computes $\hat g_j = T_{k(j)} g_j^{(k(j))}$; for $j,j'$ with
+$k(j){=}k(j'){=}k$, the relative pose
+$\hat g_{j'}^{-1}\hat g_j = (g^{(k)}_{j'})^{-1} (T_k^{-1}T_k)\, g^{(k)}_j$
+equals the backbone's within-window relative pose; rotation and translation
+direction are invariant to the window's similarity placement.
+
+\section{The scaffold memory: instantiation, loop, and relation to Vector-HaSH}
+\label{app:vhash}
+
+\subsection{Fields, modules, and sizes}
+Every ring and torus is an Amari-type neural field integrated forward in
+time (bump width ${\approx}8$ units on a $48$ grid). The configuration
+used in all experiments (\texttt{compact}) has three spatial modules,
+each a $48{\times}48$ torus (horizontal phase) plus a $48$-unit height
+ring, and three head-direction rings of $256$ units (ZYX Euler) driven
+through the rotation gate $R(\hat\psi,\hat\theta,\hat\phi)$, the unique
+gating making phase increments exact differentials (measured $9.3\times$
+gap over alternatives). The joint code is
+$\mathbf g\in\mathbb R^{N_g}$ with
+$N_g = 3\times(48^2{+}48) + 3\times256 = 7{,}824$. Periods
+$\{2.4,3.2,4.0\}$ (normalized scene units, median depth ${:=}1$) form the
+smallest coprime ladder $3{:}4{:}5$, giving a Chinese-remainder
+unambiguous range of $2.4\cdot\mathrm{lcm}(3,4,5)=144$ units---beyond
+every benchmark scene. Range multiplies per added module (the shipped
+\texttt{default} adds $\lambda{=}5.6$, $N_g{=}10{,}176$; a six-module
+plan-scale point, $N_g{=}14{,}880$, exists as design headroom and is not
+used in any reported experiment): scaling is additive hardware, not
+retuning.
+
+\subsection{The consistency loop and what it corrects}
+$\mathbf g$ is projected to a sparse hippocampal layer through a
+\emph{fixed random} matrix and returned through an associative map,
+\begin{equation}
+\mathbf h=\sigma(W_{gh}\,\mathbf g),\qquad
+\hat{\mathbf g}=\psi(W_{hg}\,\mathbf h),
+\end{equation}
+with $\sigma$ a top-$k$ threshold ($N_h{=}1024$, $k{=}64$ active; a scaled variant, $8192/410$, is available and unchanged in behavior) and $\psi$ per-field
+normalization back to a valid population code. For the sparse binary
+codes of Vector-HaSH a Hebbian sum approximates the return map; for our
+\emph{continuous} field templates the Hebbian sum is at chance, and the
+ridge form $W_{hg}=G(H^{\!\top}H+\lambda I)^{-1}H^{\!\top}$ is the
+faithful pseudoinverse implementation (verified empirically). Formation
+visits states \emph{covering every per-module phase} at spacing
+$\le\lambda_{\min}/6$ (six samples per period per axis---the measured
+covering condition) over a formation extent of $1.2$ normalized units;
+thereafter all $\prod_m\lambda_m$ joint states are attractors provided
+$N_h\ge N_h^{\!*}$, with $N_h^{\!*}$ linear in $M$ and nearly independent
+of period; we set $N_h\ge4\times$ the measured $N_h^{\!*}$.
+
+The loop's power is \emph{selective}, and the selectivity organizes the
+whole system. Perturbations of the joint fiber split into a
+\emph{coherent} subspace---module shifts explicable by one spatial
+displacement, which describe another perfectly legitimate location and are
+internally invisible---and its \emph{incoherent} complement, module
+combinations that agree with no location. Settling through the loop
+corrects exactly the incoherent part; the coherent part can only be pinned
+by external observation. \smr{} supplies that pin: every input view is
+\emph{anchored} at its backbone pose (a localized clamp input---anchoring,
+not state overwrite), and verified loop closures re-pin the past. The
+attractor loop and the geometric machinery of App.~\ref{app:closure} are
+thus not alternatives but a division of labor: dynamics absorb incoherent
+drift continuously; placement and closure correct the coherent drift that
+dynamics cannot see.
+
+\paragraph{Argument for Proposition~\ref{prop:coherent}.}
+Let $\Phi(\gvec)=\psi(W_{hg}\,\sigma_k(W_{gh}\,\gvec))$ be the loop. Formation
+fits $W_{hg}$ by ridge regression so that $\Phi(\gvec_p)=\gvec_p$ for the
+template code $\gvec_p$ of every joint phase $p$ on the formation lattice; the
+per-field normalization $\psi$ maps any output onto the manifold $\mathcal M$
+of valid population codes (one bump per field), and the lattice covers each
+module's phase at spacing $\le\lambda_{\min}/6$, the measured covering
+condition under which the interpolation error of $\Phi$ between lattice
+templates stays below the bump width, so every point of $\mathcal M$ is (to
+numerical precision) a fixed point. A perturbation $\delta$ of a stored code
+$\gvec_p$ decomposes as $\delta=\delta_{\parallel}+\delta_{\perp}$ with
+$\gvec_p+\delta_{\parallel}\in\mathcal M$ (a coherent shift: one displacement
+applied to every module, i.e., the code of another location) and
+$\delta_{\perp}$ transverse to $\mathcal M$ (module states that agree with no
+single location). Since $\gvec_p+\delta_{\parallel}$ is itself a fixed point,
+$\Phi$ leaves it unchanged; since $\mathcal M$ is the attracting set of $\Phi$
+(empirically, with a contraction factor below one for the transverse component
+at every tested $N_h\ge N_h^{*}$), iterating $\Phi$ removes $\delta_{\perp}$.
+The loop is therefore exactly as strong as it is blind: it cannot distinguish
+$\gvec_p+\delta_{\parallel}$ from a legitimate memory of another place, and
+only a clamp---an input pinning a field to an externally measured phase---can
+correct it. This is the operational content of Vector-HaSH's
+coherent/incoherent split, restated for continuous fields and used as a design
+rule rather than a theorem about capacity.
+
+\subsection{Indexing: cards, not photocopies}
+Following the library principle, the hippocampal layer does not store
+content. Each bound state associates the scaffold code with a
+\emph{card}: a $448$-dimensional cue descriptor plus an index code
+addressing the bank, where the actual content lives: owner window, owner-gauge pose, surfels, and per-primitive appearance features consumed by the supervised recall-side renderer. Scenes coexist through per-module remap offsets, so one scaffold serves many scenes.
+This indexing substitution is the one structural
+change relative to Vector-HaSH, and it is what lets the same scaffold
+serve arbitrarily heavy content (full surfel sets) at fixed loop cost.
+
+\subsection{Cues, novelty, and retrieval}
+\label{app:cue}
+\paragraph{The scaffold cue.}
+The cue keying each bound state is a $448$-dimensional engineered
+descriptor: a $192$-d color thumbnail, $144$-d grey structure bands, and
+$48$-d intensity histograms, $\ell_2$-normalized per block so that
+natural magnitudes act as implicit weights. Two seemingly reasonable
+enrichments were tested and rejected by measurement: appending a depth
+channel and learning a re-weighting both \emph{reduced} retrieval on the
+held-out probe (from $97.5\%$ correct to $64.5\%$ with the depth
+channel), because both couple the cue to quantities that vary with the
+backbone and the gauge. The long-range revisit proposals of the
+stitcher use a frozen self-supervised global descriptor
+\citep{dinov2} over the same bank. We do not key memory on the
+backbone's own features for a structural reason: the cue must be
+identical across backbones for one bank to serve six models, and it must
+remain valid if the backbone is swapped; pooled backbone features remain
+a candidate replacement and will be adopted only if they match the
+engineered cue on the retrieval probe.
+
+\paragraph{Novelty gate.}
+A view is bound only if its cue similarity to every stored card is below
+$\tau=\max(0.2,\,3\times\mathrm{floor})$, where the floor is the
+similarity of unrelated views, probed at bind time from lattice
+midpoints of the current scene. The floor is probed rather than fixed
+because a constant threshold, tuned on one scene family, produced a
+false ``familiar'' verdict in deployment on another.
+
+\paragraph{Two-stage retrieval.}
+Recall proposes the top-$5$ scaffold matches by cue similarity and
+verifies each geometrically (App.~\ref{app:closure}) before any is
+used. In the controlled cue-corruption test (cosine ${\approx}0.71$ to
+the true cue), single-shot recall returned the correct state in $22$ of
+$39$ probes; propose-and-verify returned $39$ of $39$. Verification is
+not a safeguard bolted on---it is the recall mechanism appropriate to a
+continuous state space, where the nearest attractor is not guaranteed to
+be the right one.
+
+\section{Closure: proposal, anchored re-measurement, consensus}
+\label{app:closure}
+\paragraph{Sites.}
+A proposal $(q, j_{\text{old}})$ defines a site
+$\{\,j_{\text{old}},\, j_{\text{old}}{+}\delta\,\}$ (partner offset
+$\delta{=}3$ keyframes; the partner disambiguates orientation and provides
+baseline). Up to $n_s{=}2$ sites from distinct old frames are attached per
+window per proposal round.
+
+\paragraph{Anchored pass and the closure estimate.}
+Let $\cA = \cW_k \cup \text{sites}$. One backbone pass on $\cA$ yields
+poses $\{h_i\}_{i\in\cA}$ in the anchored gauge. Two robust fits
+(App.~\ref{app:sim3}) give
+$S_{\cA\to k}$ (anchored $\to$ window-$k$ gauge, over $\cW_k$'s frames) and
+$S_{\cA\to o}$ (anchored $\to$ owner gauge of the site, over site frames,
+matched to their stored $g^{(k(j_{\text{old}}))}$). The candidate closure
+between nodes is
+\begin{equation}
+\hat Z \;=\; S_{\cA\to o}\; S_{\cA\to k}^{-1}
+\;\in\;\simthree ,
+\end{equation}
+mapping window-$k$ coordinates into the old owner's coordinates. Site fits
+use $n{=}2$ frames plus the window-side redundancy; the scale gate of
+App.~\ref{app:sim3} applies to both fits.
+
+\paragraph{Two-site consensus.}
+Sites $a,b$ yield $\hat Z_a,\hat Z_b$ and implied placements
+$T_k^{(a)},T_k^{(b)}$ of the new window. Acceptance requires
+\begin{equation}
+\angle\big(R(T_k^{(a)}),R(T_k^{(b)})\big) \le \theta_{\text{agree}},
+\qquad
+\big\|c(T_k^{(a)})-c(T_k^{(b)})\big\| \le \lambda_{\text{agree}}\cdot E,
+\end{equation}
+with $E$ the current map extent (scene-relative tolerance). Independent
+wrong matches rarely agree; look-alike structures that defeat this gate
+(repetitive facades) are the recorded failure mode, and any residual wrong
+closure is exposed to the batch solver's rejection round. Accepted closures
+add a loop edge $Z=\hat Z$ (consensus-averaged over agreeing sites) with a
+scale weight reflecting the site fit's confidence; rejected proposals are
+logged with their disagreement.
+
+\section{Pose-graph objective and solvers}
+\label{app:pgo}
+Variables are node placements $T_1,\dots,T_K\in\simthree$ ($T_1$ fixed as
+gauge). Each edge $e=(c,k,Z_e,w_e)$ contributes the residual
+\begin{equation}
+r_e(T) \;=\; \mathrm{Log}\!\big(Z_e^{-1}\, T_c^{-1} T_k\big)
+\;=\;(\omega_e,\nu_e,\sigma_e)\in\mathbb{R}^{7},
+\end{equation}
+weighted componentwise: rotation and translation by edge type, log-scale by
+$w_e$ (sequential edges measure scale reliably from many shared frames,
+$w_e{=}1$; loop-edge scale from two-frame sites is down-weighted). The
+batch objective is
+\begin{equation}
+\min_{T_2..T_K}\; \sum_e \rho_{\text{H}}\!\big(\|r_e(T)\|_{\Lambda_e}\big),
+\end{equation}
+with Huber $\rho_{\text{H}}$ \citep{huber}, solved by Levenberg--Marquardt
+on the $7(K{-}1)$-dimensional parameterization from the chained
+initialization. A \emph{rejection round} follows: edges whose robust
+residual exceeds a multiple of the median are removed and the problem is
+re-solved once \citep{grisetti}; the count of dropped edges is reported.
+
+\paragraph{Streaming relaxation.}
+Online, an accepted closure at window $k$ against owner $o$ implies a
+correction $C = T_o Z\, \big(T_k^{\text{pred}}\big)^{-1}$. \smr{}
+distributes $\mathrm{Log}\,C$ over the intervening nodes
+$o{+}1,\dots,k$ with linearly increasing fractions (rotation, translation,
+and log-scale interpolated in the tangent space), leaving nodes outside the
+span untouched: cost $O(k-o)$ per closure, causal, and equivalent to one
+Gauss--Seidel sweep of the batch problem restricted to the span. All
+reported ``streaming'' results use only this rule; ``batch'' adds the full
+solve above at sequence end.
+
+\section{Surfels, rendering, and fusion}
+\label{app:surfel}
+\paragraph{Construction.}
+For an owned frame $j$, pixels on a stride grid with valid depth are
+unprojected: $x = g_j^{(k(j))}\cdot \pi^{-1}(u; D_j(u), K_j)$, carrying the
+pixel color and an isotropic footprint from the local depth gradient. The
+global position of every surfel is $T_{k(j)}\cdot x$---stored once in the
+owner gauge, re-embedded for free whenever the solver updates $T$.
+
+\paragraph{Rendering (used by relocalization visualization and NVS
+conditioning).}
+Surfels are projected into a target camera with a z-buffer and a small
+square splat (2--3\,px) for hole suppression---classical point splatting
+\citep{surfels}, not 3D Gaussian splatting; no covariances or opacities are
+stored or optimized. The renderer is deterministic and differentiable-free.
+
+\paragraph{Cross-window fusion for depth/point benchmarks.}
+\label{app:fusion}
+For multi-view depth and point-map evaluation, $k$ overlapping windows over
+the view set are bound as above; alignment across windows uses pose-head
+junctions only. For each target pixel, candidate 3D points from all windows
+containing the view are collected; a point is kept if at least $m{=}2$
+windows agree within $\tau_{\text{fuse}}$ (relative to depth), and the
+fused estimate is the coordinate-wise median of the agreeing set.
+Consistency filtering targets accuracy; multi-window coverage protects
+completeness. Depth is never used to estimate any transform---the
+alignment-versus-estimand separation is a design rule motivated by six
+recorded negative results in development, in which every densification of
+the \emph{alignment} channel (3D--3D edges, dense placement, long-span pose
+fits) degraded accuracy due to correlated per-pass error.
+
+\section{Compute and memory measurements}
+\label{app:compute}
+Tables~\ref{tab:compute} and~\ref{tab:memvsn} give the resource side of
+Sec.~\ref{sec:results-pose} on identical hardware (one RTX 6000 Ada, 46\,GB,
+batch 1, public weights). The pattern is the thesis in resource units: native
+inference pays for input length in VRAM---token cache (StreamVGGT), attention
+mask (STream3R), pairwise-alignment graph (DUSt3R/MASt3R)---and three
+architectures hit the wall inside the studied range, while the composed
+system's peak is the window's and constant in $N$. The memory's own cost is
+one $36$-frame anchored pass per accepted closure ($0.2$--$1.7$ closures per
+sequence, measured per backbone) and a sub-second robust solve.
+
+\begin{table}[h]
+\centering\scriptsize
+\setlength{\tabcolsep}{3.5pt}
+\caption{Compute at $N{=}100$ input frames on one RTX 6000 Ada (46\,GB),
+batch 1, public weights. \emph{native}: one $N$-frame inference, all
+columns measured by the probe (host-RAM per-pass delta ${\approx}0$;
+peak is reached at weight load). \emph{raw}: Sim(3)-chained windows,
+wall time measured cold during the Table~\ref{tab:pose} runs.
+\emph{+\smr{}}: raw $+$ its measured memory overhead---per accepted
+closure ($0.2$--$1.7$/sequence, measured per backbone) one 36-frame
+anchored pass at the probe-measured unit time---and \emph{+PGO} adds the
+measured end-to-end solver-stage delta. GPU peaks are per-variant
+measurements from the same runs. $^{c}$CPU seconds and GFLOPs of
+windowed rows compose measured 32/36-frame unit passes
+($n_{\mathrm{win}}{=}6$). $^{e}$end-to-end stage time; the Sim(3) solve
+itself is ${<}1$\,s (App.~\ref{app:pgo})---the remainder is harness
+re-evaluation for the pairwise backbones. $^{s}$,$^{d}$: see
+Table~\ref{tab:memvsn}.}
+\label{tab:compute}
+\begin{tabular}{@{}l rrrrr@{}}
+\toprule
+Model & CPU (s) & GPU (GB) & GFLOPs & Time (s) & s/frame \\
+\midrule
+DUSt3R (native) & \multicolumn{5}{c}{n/f: pairwise global alignment (host-RAM/time wall)} \\
+\;raw, windowed & 2447$^{c}$ & 25.8 & 10{,}577{,}648$^{c}$ & 732.8 & 7.33 \\
+\;+\smr{} & 3166$^{c}$ & 28.8$^{d}$ & 13{,}712{,}530$^{c}$ & 1020.8 & 10.21 \\
+\;+\smr{}+PGO & 3166$^{c}$ & 28.8 & 13{,}712{,}530$^{c}$ & 1559.9$^{e}$ & 15.60 \\
+\midrule
+Fast3R (native) & 50.1 & 13.9 & 662{,}924 & 8.0 & 0.08 \\
+\;raw, windowed & 106$^{c}$ & 9.1 & 577{,}570$^{c}$ & 22.0 & 0.22 \\
+\;+\smr{} & 132$^{c}$ & 9.2 & 705{,}528$^{c}$ & 24.9 & 0.25 \\
+\;+\smr{}+PGO & 132$^{c}$ & 9.2 & 705{,}528$^{c}$ & 29.8 & 0.30 \\
+\midrule
+MASt3R (native) & \multicolumn{5}{c}{n/f: pairwise global alignment (host-RAM/time wall)} \\
+\;raw, windowed & 2181$^{c}$ & 7.1 & 9{,}322{,}638$^{c}$ & 1067.4 & 10.67 \\
+\;+\smr{} & 2274$^{c}$ & 7.6$^{d}$ & 11{,}890{,}239$^{c}$ & 1109.1 & 11.09 \\
+\;+\smr{}+PGO & 2274$^{c}$ & 7.6 & 11{,}890{,}239$^{c}$ & 1894.7$^{e}$ & 18.95 \\
+\midrule
+VGGT (native) & 32.9 & 15.1 & 2{,}201{,}982 & 19.9 & 0.20 \\
+\;raw, windowed & 50$^{c}$ & 9.5 & 1{,}804{,}796$^{c}$ & 25.1 & 0.25 \\
+\;+\smr{} & 66$^{c}$ & 9.6 & 2{,}436{,}362$^{c}$ & 32.3 & 0.32 \\
+\;+\smr{}+PGO & 66$^{c}$ & 9.6 & 2{,}436{,}362$^{c}$ & 42.5 & 0.43 \\
+\midrule
+VGGT-$\Omega$ (native) & 24.0 & 11.9 & 1{,}079{,}048 & 11.3 & 0.11 \\
+\;raw, windowed & 41$^{c}$ & 6.8 & 944{,}944$^{c}$ & 19.1 & 0.19 \\
+\;+\smr{} & 52$^{c}$ & 6.9 & 1{,}257{,}536$^{c}$ & 22.9 & 0.23 \\
+\;+\smr{}+PGO & 52$^{c}$ & 6.9 & 1{,}257{,}536$^{c}$ & 29.3 & 0.29 \\
+\midrule
+$\pi^3$ (native) & 28.4 & 26.5 & 1{,}519{,}345 & 16.7 & 0.17 \\
+\;raw, windowed & 46$^{c}$ & 13.0 & 1{,}349{,}872$^{c}$ & 25.3 & 0.25 \\
+\;+\smr{} & 58$^{c}$ & 14.1 & 1{,}824{,}876$^{c}$ & 31.0 & 0.31 \\
+\;+\smr{}+PGO & 58$^{c}$ & 14.1 & 1{,}824{,}876$^{c}$ & 42.0 & 0.42 \\
+\midrule
+StreamVGGT (native) & 49.8 & 22.7 & 1{,}283{,}334 & 37.0 & 0.37 \\
+\;raw, windowed & 56$^{c}$ & 11.0 & 1{,}252{,}493$^{c}$ & 24.9 & 0.25 \\
+\;+\smr{} & 72$^{c}$ & 11.1 & 1{,}587{,}905$^{c}$ & 33.9 & 0.34 \\
+\;+\smr{}+PGO & 72$^{c}$ & 11.1 & 1{,}587{,}905$^{c}$ & 46.3 & 0.46 \\
+\midrule
+STream3R (native) & \multicolumn{5}{c}{OOM: mask allocation requests 70.3\,GiB} \\
+\;raw, windowed & 67$^{c}$ & 21.1 & 1{,}804{,}796$^{c}$ & 29.9 & 0.30 \\
+\;+\smr{} & 88$^{c}$ & 25.4$^{s}$ & 2{,}357{,}416$^{c}$ & 42.9 & 0.43 \\
+\;+\smr{}+PGO & 88$^{c}$ & 25.4 & 2{,}357{,}416$^{c}$ & 59.0 & 0.59 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering\scriptsize
+\setlength{\tabcolsep}{4pt}
+\caption{GPU peak memory (GB) versus input length $N$: one native
+$N$-frame inference (probe, measured per $N$) against the composed
+system's measured peak over its actual 32/36-frame passes at that $N$
+(from the Table~\ref{tab:pose} runs). Native cost grows for every
+architecture and walls for three of them---token cache (StreamVGGT,
+$N{=}200$), attention mask (STream3R, $N{\ge}50$), pairwise-alignment
+graph (DUSt3R/MASt3R, n/f beyond $N{=}50$)---while +\smr{} is constant
+in $N$ at the window/anchored-pass cost. $^{s}$one-time step from the
+${\le}W$ single pass to the 32/36-frame pass; constant thereafter.
+$^{d}$DUSt3R/MASt3R windowed peaks drift ${\sim}0.1$--$0.7$\,GB per
+additional window (allocator retention in their alignment code), not
+context growth.}
+\label{tab:memvsn}
+\begin{tabular}{@{}l rr rr rr rr@{}}
+\toprule
+ & \multicolumn{2}{c}{$N{=}10$} & \multicolumn{2}{c}{$N{=}50$}
+ & \multicolumn{2}{c}{$N{=}100$} & \multicolumn{2}{c}{$N{=}200$} \\
+Model & nat. & +\smr{} & nat. & +\smr{} & nat. & +\smr{} & nat. & +\smr{} \\
+\midrule
+DUSt3R & 4.9 & 4.4 & OOM & 25.8$^{d}$ & n/f & 28.8$^{d}$ & n/f & 32.1$^{d}$ \\
+Fast3R & 6.3 & 5.7 & 11.4 & 9.1 & 13.8 & 9.2 & 18.7 & 9.2 \\
+MASt3R & 3.2 & 3.2 & 20.7 & 6.7 & n/f & 7.6$^{d}$ & n/f & 8.8$^{d}$ \\
+VGGT & 9.1 & 8.5 & 11.1 & 9.5 & 15.1 & 9.6 & 23.9 & 9.6 \\
+VGGT-$\Omega$ & 5.7 & 5.7 & 8.1 & 6.8 & 11.9 & 6.9 & 19.5 & 7.0 \\
+$\pi^3$ & 8.8 & 8.8 & 16.3 & 13.0 & 26.5 & 14.1 & OOM & 14.6 \\
+StreamVGGT & 8.6 & 8.1 & 14.8 & 11.0 & 22.7 & 11.1 & OOM & 11.4 \\
+STream3R & 10.9 & 10.0 & OOM & 21.1$^{s}$ & OOM & 25.4$^{s}$ & OOM & 25.4$^{s}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Novel view synthesis: protocol, renderer, head}
+\label{app:nvs}
+\paragraph{Protocol.} We follow the object protocol of LVSM \citep{lvsm} and
+VGGT \citep{vggt}: four input views and ten target views per object, scored by
+PSNR, SSIM and LPIPS \citep{lpips} on the full $256^2$ image composited on
+white. GSO \citep{gso} is the test set. The published rows of
+Table~\ref{tab:nvs} were computed on their authors' renders (Objaverse and GSO
+renders for GS-LRM/LVSM; an internal set for VGGT-NVS), none of which is
+public, so our rows are computed on our own renders under one stated protocol
+and compared among themselves.
+
+\paragraph{Renders.} Objects are normalized to a bounding sphere of radius
+$0.5$ at the origin; cameras lie on a sphere of radius $2.0$ with a vertical
+field of view of $40^\circ$ (the object always fits: the ball subtends
+$29^\circ$); images are $256^2$, OpenCV camera convention in a $y$-up world.
+Training objects: ${\approx}20$K Objaverse-LVIS objects \citep{objaverse},
+sampled round-robin over the 1{,}156 LVIS categories with a fixed seed
+(${\approx}3\%$ of Objaverse; VGGT used an internal set of ${\approx}20\%$),
+$16$ views each at azimuth $\sim U(0,360^\circ)$ and elevation
+$\sim U(-20^\circ,60^\circ)$. GSO: four inputs at elevation $20^\circ$ and
+azimuths $0/90/180/270^\circ$ plus ten targets drawn as training views with a
+per-object seed. Renderer: Blender Cycles (GPU, 32 adaptive samples,
+denoised), a white world plus one sun fixed per object, standard view
+transform, RGBA output whose alpha is the object mask; the same renderer
+produces training and test images.
+
+\paragraph{Geometry.} The frozen backbone runs on the four input images; each
+view's predicted depth (or point head, expressed in that view's camera) is
+unprojected through the \emph{known} input camera, with the metric scale given
+by the Sim(3) fitting the four predicted cameras to the four given ones (the
+``known input cameras'' setting of GS-LRM/LVSM). Maps are resampled from the
+backbone grid to the render grid; the square image is never cropped. The
++\smr{} row applies the in-window read of Sec.~\ref{sec:read}: four orderings
+of the same views, symmetric re-measure of each pass's scale about the given
+cameras, per-pixel consensus by the median of the witnesses---the same
+functions as the DTU/ETH3D rows.
+
+\paragraph{Head and training.} A per-pixel Gaussian head \citep{kerbl3dgs} in
+the spirit of Splatt3R \citep{splatt3r}: a small U-Net (${\approx}1.2$M
+parameters) over eight input channels (rgb, world $xyz$, depth, confidence)
+predicts, for every valid pixel (object mask and finite geometry), a position
+offset bounded to $0.02$ ($4\%$ of the object radius, so the backbone's
+geometry stays in charge), log-scales about one pixel footprint, a rotation,
+an opacity, and a colour residual on the input colour; the output layer is
+zero-initialized so training starts from ``splat the backbone's coloured
+points''. Gaussians are rasterized with gsplat into the target cameras on a
+white background. One head per backbone, trained on raw geometry for $30$K
+steps (one object per step, four inputs and four random targets, AdamW
+$2\times10^{-4}$ with warm-up and cosine decay, MSE $+\,0.1\,$LPIPS), then
+evaluated with raw and with read geometry unchanged. The head is deliberately
+light: the question is whether corrected geometry renders better through a
+fixed decoder, not how far a decoder can be pushed.
+
+\section{Related work}
+\label{app:related}
+\paragraph{Feed-forward geometry.} DUSt3R and MASt3R \citep{dust3r,mast3r}
+regress pointmaps for image pairs and assemble many views by global
+alignment; Fast3R \citep{fast3r}, VGGT \citep{vggt}, VGGT-$\Omega$
+\citep{vggtomega} and $\pi^3$ \citep{pi3} process a whole window in one pass,
+$\pi^3$ without a reference frame. All are bounded by the window, and long
+inputs are handled by chaining windows with Sim(3) junctions---the regime
+Sec.~\ref{sec:bleed} analyses. Streaming models---CUT3R \citep{cut3r},
+StreamVGGT \citep{streamvggt}, STream3R \citep{stream3r}---move memory into a
+recurrent state or a causal token cache; they extend the horizon but cannot
+revise, verify, or persist, and their memory grows with the sequence.
+
+\paragraph{SLAM on foundation models.} MASt3R-SLAM \citep{mast3rslam},
+VGGT-SLAM and VGGT-SLAM++ \citep{vggtslam,vggtslampp}, ViSTA-SLAM
+\citep{vistaslam} and SLAM-Former \citep{slamformer} put frozen or fine-tuned
+geometry models on classical SLAM spines (keyframe graphs, loop closure by
+retrieval, Sim(3)/SL(4) pose graphs); DROID-SLAM \citep{droidslam} and
+NICER-SLAM \citep{nicerslam} are learned or neural-field pipelines with
+calibrated inputs. \smr{} differs in what the memory \emph{is}---a
+prestructured scaffold with dynamics and one-shot binding rather than a
+keyframe database---and in how it measures: closures are re-measured by the
+backbone itself in one anchored pass and accepted only on two-site consensus;
+the same memory serves every backbone unchanged.
+
+\paragraph{Scaffold memory.} Vector-HaSH \citep{vectorhash} showed that
+binding content to a grid-cell scaffold through fixed random projections and
+plastic return weights gives high-capacity, robust sequence and episodic
+memory, with capacity in the scaffold's combinatorial state space rather than
+in pattern--pattern association. We keep the policy, the fields, and the
+coherent/incoherent split, make the scaffold metric (clamped by a vision
+model's poses), replace stored patterns by cards indexing a bank, and add the
+geometric verification loop the split calls for.
+
+\paragraph{Feed-forward view synthesis.} LGM \citep{lgm}, GS-LRM \citep{gslrm}
+and LVSM \citep{lvsm} learn object-level novel view synthesis from hundreds of
+thousands of rendered Objaverse objects; Splatt3R \citep{splatt3r} predicts
+Gaussians on top of a frozen MASt3R. Our NVS rows use the latter design at a
+small scale on purpose: the decoder is fixed across the rows of a backbone, so
+a row difference isolates the memory's geometry.
+
+\section{Hyperparameters and reproducibility}
+\label{app:repro}
+Table~\ref{tab:hparams} lists every hyperparameter of the system with
+its value and the section that motivates it; one setting is shared
+across all tasks and backbones unless a dataset-scale quantity is noted.
+Values were set in three ways, stated per row in the text that
+introduces them: by derivation (the coprime period ladder and its
+Chinese-remainder range; the formation spacing, which is the measured
+covering condition $\lambda_{\min}/6$; the rotation gate, which is the
+unique exact-differential choice), by targeted measurement (the ridge
+return map, after the Hebbian sum tested at chance on continuous
+templates; the probed novelty floor, after a fixed threshold failed in
+deployment; scene-scaled consensus tolerances, after absolute indoor
+thresholds admitted look-alike closures outdoors; pose-head-only
+alignment, after every densification of the alignment channel measured
+worse), or as conventional defaults awaiting sensitivity sweeps (window
+and overlap; the descriptor block sizes).
+
+\begin{table}[h]
+\centering\small
+\caption{All hyperparameters. ``Norm.\ u.''\,= normalized scene units
+(median scene depth ${:=}1$).}
+\label{tab:hparams}
+\begin{tabular}{@{}llll@{}}
+\toprule
+Symbol & Meaning & Value & Introduced in \\
+\midrule
+$W,\,O$ & window length, overlap & $32,\;16$ & Sec.~\ref{sec:bleed} \\
+$\lambda_{1..3}$ & module periods (norm.\ u.) & $2.4,\,3.2,\,4.0$ & Sec.~\ref{sec:scaffold} \\
+--- & torus / height-ring / HD-ring size & $48^2$ / $48$ / $256$ & Sec.~\ref{sec:scaffold} \\
+$N_g$ & grid-code dimension & $7{,}824$ & Sec.~\ref{sec:scaffold} \\
+$N_h,\,k$ & sparse layer size, active units & $1024,\,64$ & Sec.~\ref{sec:policy} \\
+--- & formation spacing (norm.\ u.) & $0.4$ / $0.3$ $(\le\lambda_{\min}/6)$ & Sec.~\ref{sec:policy} \\
+--- & cue dimension (color/structure/hist.) & $448=192{+}144{+}48$ & App.~\ref{app:cue} \\
+$\tau$ & novelty gate & $\max(0.2,\,3\times\text{floor})$ & App.~\ref{app:cue} \\
+--- & retrieval proposals & top-$5$, verified & App.~\ref{app:cue} \\
+$\Delta$ & revisit gap (keyframes) & $32$--$64$ (dataset scale) & Sec.~\ref{sec:read} \\
+$n_s,\,\delta$ & consensus sites, partner offset & $2,\;3$ & Sec.~\ref{sec:read} \\
+$\theta_{\text{agree}},\lambda_{\text{agree}}$ & consensus tolerances & $3$--$10^\circ$, $0.15$--$0.3\times$extent & App.~\ref{app:closure} \\
+$\gamma_s$ & scale gate & $1.5$ & App.~\ref{app:sim3} \\
+$\kappa$ & Huber constant & $2.5$ & App.~\ref{app:sim3} \\
+$m,\,\tau_{\text{fuse}}$ & fusion votes, tolerance & $2$, relative to depth & App.~\ref{app:fusion} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Keyframe stride is $1$--$3$ for indoor and object video and $2$--$3$ for
+driving; the input-length studies vary the stride on a fixed $200$-frame
+set so that every length samples the same content. Backbones use their
+public weights and preprocessing, unmodified. All randomness is seeded.
+Every experiment writes a JSON report containing per-sequence metrics,
+accepted and rejected closures with residuals, and solver diagnostics;
+code, configurations, and the report scripts will be released.
+
+\input{downstream_appendix}

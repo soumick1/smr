@@ -1,4 +1,4 @@
-# SMR HANDOVER MANIFEST — VGGT Table 2/3 reproduction chase (2026-09-05, v141)
+# SMR HANDOVER MANIFEST — VGGT Table 2/3 reproduction chase (2026-09-07, v149)
 Read this fully before acting. Rules that are LAW in this project:
 code > Overleaf > memory; every patch VERIFIES its landing (assert/grep) before packaging;
 predictions recorded BEFORE runs and scored honestly (current scoreboard 3.0/10);
@@ -58,7 +58,7 @@ If needed read the ENTIRE paper incl. supplementary for eval details.
 
 ## INFRASTRUCTURE (persistent sandbox /home/claude; server ssh soumick@zlab-ws3)
 - Sandbox repo /home/claude/smr mirrors server ~/smr. Latest shipped:
-  smr_updates141.zip (v141). Key tools: experiments/points_suite.py (v120:
+  smr_updates149.zip (v149). Key tools: experiments/points_suite.py (v120:
   windows+overlap, chained junctions, tau-rel gate, keep-singles, --gt-cams,
   --n-views/--view-seed, --conf-pct), scripts/dtu_eval.py (v121: ObsMask/BB/plane
   protocol, --points-dir, --icp Sim3-ICP; CALIBRATED: reproduces furu/tola/camp
@@ -74,7 +74,22 @@ If needed read the ENTIRE paper incl. supplementary for eval details.
   windows+memory BEAT native). Sandbox copy: /home/claude/iclr_paper/iclr2027.
 - Transcripts: /mnt/transcripts (see journal.txt) for verbatim history.
 
-## IMMEDIATE NEXT ACTIONS (UPDATE_NOTES_v139.md)
-1. NVS dry run (§4): 20 objaverse + 5 GSO, render, LOOK at one GSO input view (up-axis check), report s/view.
-2. Full fetch + render (§5) on 3 GPUs (~13 h predicted).
-3. v140: Gaussian head + trainer + GSO evaluator; then rows raw / +SMR read; Overleaf Table 7 rows.
+## PAPER (v143): full rewrite of the ICLR draft -- Fig 1 (system), Fig 2 (results), Prop. 1, Evaluation design,
+## final dense numbers, NVS section + empty Table 3, Limitations, Conclusion, statements; compute tables -> App. G;
+## App. H NVS protocol, App. I related work. 9 pages main. Bib placeholders 'verify entry' remain (companion bib).
+
+## DATA (Sep 6): GSO 1,033 models; 20K Objaverse GLBs (155.6 GB, filtered <= 40 MB for rendering); renders DONE.
+## v144: check_renders.py. RESULT: 19,209 rendered, 262 excluded -> 18,947 usable; GSO 1,033/0 excluded (P49/P50 hit).
+## Coverage only 11-13% -> v145 crop_renders.py (70% centre crop, K rewritten) -> *_c70 roots. gsplat _C None ->
+## gsplat built via conda cuda-toolkit 12.8 + CPLUS_INCLUDE_PATH to targets/x86_64-linux/include (see ~/.bashrc).
+## TRAINED 4 heads (30K steps; val PSNR vggt 22.05, pi3 21.38, stream3r 21.14, vggt_omega 20.58). GSO raw rows:
+## pi3 21.91, vggt 20.71, vggt_omega 18.89, stream3r 18.79 (LGM-class absolute level; 30 dB needs a trained
+## transformer decoder -- not reachable by the deadline; refinement UNet could give 26-28). Read rows: pi3 identity
+## (P54 hit), vggt +0.25 on 232 objs; abstention bug + zero-gaussian crash fixed in v149 -> re-run read rows.
+## SMOKE TEST PASSED (0.4 s/step; untrained baseline 18.55 dB). v147: rows = vggt_omega/vggt/pi3/stream3r x
+## {raw,+SMR}; train_all.sh queues 4 heads on 3 GPUs; eval_all.sh reads 1 and 4 for all. Predictions P43,P47,P48,P52-54.
+
+## IMMEDIATE NEXT ACTIONS (UPDATE_NOTES_v144.md)
+1. Full data run with v142 renderer (RGBA): objaverse_fetch 20K, gso_fetch (report union count), render_all.sh.
+2. Smoke test of the torch stack on the dry renders (section 4) -> paste tail.
+3. After renders: train_all.sh (3 heads), eval_all.sh (rows), then Overleaf Table 7 rows + caption.
