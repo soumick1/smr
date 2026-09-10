@@ -187,8 +187,6 @@ def main():
     ap.add_argument("--tight-rot", default="3,1,15", help="single-site budget (a lone site may only nudge)")
     ap.add_argument("--tight-pos", default="0.5,0.15")
     ap.add_argument("--no-smooth-junctions", action="store_true", help="no per-frame blend of the previous window's overlap at a closure")
-    ap.add_argument("--local-from", default="anchored", choices=["anchored", "plain"],
-                    help="window geometry from the enlarged anchored pass (default, all runs so far) or from the window's own pass (v181)")
     ap.add_argument("--top-proposals", type=int, default=5)
     ap.add_argument("--no-robust-batch", action="store_true",
                     help="ablation: batch solve without outlier-edge rejection")
@@ -235,7 +233,6 @@ def main():
     ap.add_argument("--chunk-distortion", type=float, default=0.1)
     ap.add_argument("--sim-frames", type=int, default=40, help="frames per lap")
     a = ap.parse_args()
-    AnchoredStitcher.local_from = a.local_from   # v181 (class attribute; every stitcher instance reads it)
 
     simulated = a.simulate_chunks or a.backbone == "synthetic"
     if a.keyframe_stride is None:

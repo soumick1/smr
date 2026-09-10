@@ -3,6 +3,7 @@ from .pointmap import PointmapBackbone, RawViews, assemble          # noqa: F401
 from . import synthetic, vggt, pi3                                  # noqa: F401
 from . import dust3r, mast3r, monst3r                               # noqa: F401
 from . import fast3r, stream3r, streamvggt, vggt_omega              # noqa: F401
+from . import vggt_omega_repro                                      # noqa: F401  (v178)
 # Removed, with reasons (all upstream/environment, none of them our socket):
 #   cut3r    -- its pose token uses position -1, which only works with
 #               croco's compiled CUDA kernel; that build needs a CUDA

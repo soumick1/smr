@@ -15,6 +15,7 @@ declare -A FLAGS=(
   [Nh512]="--N-h 512"                [Nh8192]="--N-h 8192"                [torus16]="--torus-N 16"  [torus64]="--torus-N 64"
   [w16]="--chunk 16 --overlap 8"     [w64]="--chunk 64 --overlap 32"
   [desc_dino]="--descriptor dino"    [desc_feat]="--descriptor feat"
+  [index_flat]="--index flat"        [index_dynamics]="--index dynamics"
 )
 VARIANTS=${VARIANTS:-"default sites1 sites3 corr_jump corr_dist corr_none no_robust remeasure desc_rgb Nh512 Nh8192 torus16 torus64 w16 w64"}
 DATASETS=${DATASETS:-"7scenes co3d"}

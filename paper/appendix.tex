@@ -562,25 +562,67 @@ code, configurations, and the report scripts will be released.
 \section{Ablations}
 \label{app:ablations}
 \input{tab_ablation}
+\input{tab_ablation_key}
 \input{tab_ablation_read}
-Tables~\ref{tab:ablation} and~\ref{tab:ablation-read} change one knob at a time from the default configuration with
-the backbone passes fixed. Five things are worth stating in words.
-\emph{The two-site consensus is the gate.} With one anchor site the memory accepts the same number of closures and
-the two revisit-rich scenes get \emph{worse than raw} (office $0.026\!\to\!0.080$\,m, pumpkin $0.077\!\to\!0.187$):
-a single site verifies a wrong closure as readily as a right one. Three sites change nothing.
-\emph{Recognition is not correction.} Proposing and verifying closures without applying them online leaves the
-trajectory at the chained value ($0.042$ vs.\ $0.045$); the batch solve then uses the same verified edges and reaches
-the default's $0.029$, so the online correction matters for the running estimate, not for the final one.
-\emph{The two descriptors are not interchangeable.} Proposing revisits from the $448$-d scaffold cue instead of the
-DINOv2 token accepts $0.7$ closures per scene instead of $4.1$ and leaves the error at raw: the engineered cue keys
-places, it does not recognise them across viewpoints.
-\emph{The scaffold is not the bottleneck at this scale.} $N_h$ from $512$ to $8192$ and tori from $16^2$ to $64^2$
-are within noise of each other at 200 keyframes.
-\emph{Window size trades seams for pass failures.} $W{=}16$ chains worse ($0.051$) and the memory recovers more
-($0.027$, $7.7$ closures per scene); $W{=}64$ chains well ($0.023$) with one closure per scene and nothing left to
-repair---but on one CO3D orbit the 64-frame pass itself fails (AUC $28$) and no read can fix a window that did not
-reconstruct, the bound stated in Sec.~\ref{sec:limitations}.
-For the in-window read (Table~\ref{tab:ablation-read}) the gain grows with the number of orderings and does not
-saturate at four: eight orderings give ${+}1.07$\,dB against the single pass on $86\%$ of objects with the same
-Gaussian count, the protocol the dense benchmarks already use (eight passes).
+Tables~\ref{tab:ablation}--\ref{tab:ablation-read} change one knob at a time with the backbone passes fixed; every
+variant of a table is scored on the same sequences or objects. Seven findings.
+
+\paragraph{The two-site consensus is the gate.}
+With one anchor site the memory accepts the same number of closures and the two revisit-rich scenes get \emph{worse
+than raw} (office $0.026\!\to\!0.080$\,m, pumpkin $0.077\!\to\!0.187$): a single site verifies a wrong closure as
+readily as a right one. Three sites change nothing. No closure was rejected by the gate in the default runs, so the
+robust batch solve had nothing to reject and its ablation is empty by construction.
+
+\paragraph{Does the scaffold's index matter for stitching?}
+The first block of Table~\ref{tab:ablation} is the experiment a reader will construct: the same cue, the same top-5
+proposals, the same two-site verification, re-measurement, correction and PGO, with the scaffold replaced by a flat
+key--value bank ranked by cosine. On the seven seq-01 sequences and the twelve orbits it is a near-tie ($0.033$ vs.\
+$0.030$\,m; $93.3$ vs.\ $93.4$ AUC, the scaffold ahead on 6 of 12 orbits), and on the 18 trajectories of the full
+7-Scenes test split the two rank candidates equally well in both directions (online $0.040$ vs.\ $0.042$, with the
+final solve $0.039$ vs.\ $0.038$; the scaffold better on 8 trajectories, worse on 9). Reading the addresses from the
+settled attractor bumps instead of the analytic template is worse, not equivalent, on one real room (redkitchen
+$0.488$): the template--dynamics equivalence held on synthetic poses and does not transfer. The conclusion is stated
+without decoration: the long-range gains of Tables~\ref{tab:pose} and~\ref{tab:slam} come from
+recognise~$\to$~re-measure~$\to$~verify~$\to$~revise around the frozen model, and any content-addressable memory
+that proposes the same candidates obtains them. What the scaffold contributes is measured where it acts---capacity
+and aliasing under many stored views, the coherent/incoherent division of labour, persistence across sessions once a
+streaming state is gone (Sec.~\ref{sec:results-slam}), and pose-consistent recall in the rendering memory
+(App.~\ref{app:vhash})---not by the ranking of a closure proposal.
+
+\paragraph{Recognition is not correction.}
+Proposing and verifying closures without applying them online leaves the trajectory at the chained value ($0.042$
+vs.\ $0.045$); the batch solve then uses the same verified edges and reaches the default's $0.029$. The online
+correction matters for the running estimate, not for the final one.
+
+\paragraph{Which descriptor keys the scaffold (Table~\ref{tab:ablation-key}).}
+The scaffold is content-addressable: one appearance descriptor is bound with each card and cues the memory at
+retrieval, so the choice is a single ablation with three arms on the same backbone and passes. The self-supervised
+DINOv2 token accepts $4.0$ closures per sequence and recovers the most on both datasets. The backbone's own pooled
+features propose more revisits than the engineered thumbnail-and-histogram cue ($2.9$ vs.\ $0.7$) but convert them into
+no more accuracy than it does (CO3D $91.2$ vs.\ $91.4$; 7-Scenes $0.062$ vs.\ $0.061$): geometry-trained tokens are
+viewpoint-sensitive, not place-discriminative, and they tie the bank to one backbone. This is why the stitcher's scaffold
+is keyed on DINOv2, and why the engineered cue serves only the rendering-recall memory, whose cue must be computable from a
+raw frame before any backbone pass (App.~\ref{app:cue}).
+
+\paragraph{The scaffold is not the bottleneck at this scale.}
+$N_h$ from $512$ to $8192$ and tori from $16^2$ to $64^2$ are within noise of each other at 200 keyframes.
+
+\paragraph{Window size trades seams for pass failures.}
+$W{=}16$ chains worse ($0.051$) and the memory recovers more ($0.027$, $7.7$ closures per sequence); $W{=}64$ chains well
+($0.023$) with one closure per sequence and nothing left to repair---but on one CO3D orbit the 64-frame pass itself fails
+(AUC $28$) and no read can fix a window that did not reconstruct, the bound of Sec.~\ref{sec:limitations}.
+
+\paragraph{Orderings help where they are commensurable (Table~\ref{tab:ablation-read}).}
+For VGGT the read's gain grows with the number of orderings and does not saturate at four: eight orderings give
+${+}1.10$\,dB on all 1{,}033 GSO objects ($87\%$ improved) with the same Gaussian count, and ${+}0.18$ on the held-out
+Objaverse objects. For VGGT-$\Omega$ four orderings are already enough and eight are marginally worse; for $\pi^3$ every
+ordering is the same pass; for the causal STream3R each added ordering is another incommensurable witness and the median
+degrades ($-1.52$\,dB). The four-ordering protocol of Table~\ref{tab:nvs} was fixed before these runs and is kept; the
+per-backbone optimum is reported here rather than selected.
+
+\paragraph{The symmetric re-measure is a camera-uncertainty tool.}
+With known input cameras the re-measure between orderings changes nothing (${+}0.31$ vs.\ ${+}0.27$ without and with);
+on DTU and ETH3D, where the cameras come from the backbone, it is what makes the orderings comparable
+(App.~\ref{app:policies}). Abstaining instead of taking the median costs $1.9$\,dB: for rendering a hole is worse than a
+compromise.
 

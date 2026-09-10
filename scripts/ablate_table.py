@@ -13,7 +13,8 @@ LABEL = {"default": "default (2 sites, relax, robust batch)", "sites1": "1 ancho
          "corr_jump": "closure applied as a jump", "corr_dist": "closure distributed over the window", "corr_none": "closure not applied (proposal only)",
          "no_robust": "batch solve without outlier-edge rejection", "remeasure": "closure sites re-measured (4-frame pass)",
          "desc_rgb": "scaffold keyed and cued by the engineered RGB cue",
-         "desc_dino": "scaffold keyed and cued by DINOv2 (default)", "desc_feat": "scaffold keyed and cued by pooled VGGT features", "Nh512": "scaffold $N_h{=}512$", "Nh8192": "scaffold $N_h{=}8192$",
+         "desc_dino": "scaffold keyed and cued by DINOv2 (default)", "desc_feat": "scaffold keyed and cued by pooled VGGT features",
+         "index_flat": "no scaffold: flat key--value memory (cosine over cues)", "index_dynamics": "scaffold addresses from settled attractor bumps", "Nh512": "scaffold $N_h{=}512$", "Nh8192": "scaffold $N_h{=}8192$",
          "torus16": "torus $16^2$ per module", "torus64": "torus $64^2$ per module", "w16": "windows $W{=}16$, overlap 8", "w64": "windows $W{=}64$, overlap 32"}
 ORDER = list(LABEL)
 

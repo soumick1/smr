@@ -1,0 +1,34 @@
+\begin{table}[t]
+\centering\scriptsize\setlength{\tabcolsep}{3.5pt}
+\caption{\textbf{Novel view synthesis for all eight backbones} (same protocol as Table~\ref{tab:nvs}: four inputs, ten targets,
+$256^2$, PSNR$\uparrow$/SSIM$\uparrow$/LPIPS$\downarrow$ on the full image). One light Gaussian head per backbone, trained on the same
+${\approx}19$K Objaverse-LVIS objects; \emph{steps} is the head's training budget (DUSt3R and MASt3R run a global alignment
+inside every pass, so their heads were trained for 10K steps, at which the first four heads were within $0.3$\,dB of their
+final validation PSNR). raw = single pass; +\smr{} = the four-ordering read through the same head. Bold: better of each pair
+(differences within $0.01$\,dB / $0.001$ are ties).}
+\label{tab:nvs-full}
+\begin{tabular}{@{}l c ccc ccc@{}}
+\toprule
+& & \multicolumn{3}{c}{Objaverse-LVIS (held out, 174)} & \multicolumn{3}{c}{GSO (1{,}033)} \\
+\cmidrule(lr){3-5}\cmidrule(lr){6-8}
+Backbone & steps & PSNR & SSIM & LPIPS & PSNR & SSIM & LPIPS \\
+\midrule
+VGGT-$\Omega$ (raw) & 30K & 20.84 & 0.839 & 0.193 & 18.89 & 0.796 & 0.204 \\
+\;+\smr{} & & \textbf{20.89} & \textbf{0.841} & \textbf{0.191} & \textbf{19.07} & \textbf{0.799} & \textbf{0.200} \\
+VGGT (raw) & 30K & 22.79 & 0.863 & 0.147 & 20.71 & 0.821 & 0.152 \\
+\;+\smr{} & & \textbf{22.88} & 0.863 & 0.146 & \textbf{20.95} & \textbf{0.823} & \textbf{0.143} \\
+$\pi^3$ (raw) & 30K & 22.20 & 0.857 & 0.169 & 21.91 & 0.844 & 0.132 \\
+\;+\smr{} & & 22.19 & 0.857 & 0.169 & 21.91 & 0.844 & 0.132 \\
+STream3R (raw) & 30K & \textbf{21.15} & 0.836 & \textbf{0.190} & \textbf{18.79} & \textbf{0.784} & \textbf{0.208} \\
+\;+\smr{} & & 21.07 & 0.836 & 0.195 & 18.60 & 0.781 & 0.222 \\
+Fast3R (raw) & 30K & \textbf{16.99} & \textbf{0.834} & 0.276 & 14.07 & \textbf{0.784} & 0.322 \\
+\;+\smr{} & & 16.87 & 0.832 & 0.277 & \textbf{14.20} & 0.782 & 0.321 \\
+StreamVGGT (raw) & 30K & 21.21 & 0.838 & 0.192 & 18.30 & 0.776 & 0.226 \\
+\;+\smr{} & & \textbf{21.62} & \textbf{0.843} & \textbf{0.180} & \textbf{18.59} & \textbf{0.781} & \textbf{0.219} \\
+DUSt3R (raw) & 10K & -- & -- & -- & -- & -- & -- \\
+\;+\smr{} & & -- & -- & -- & -- & -- & -- \\
+MASt3R (raw) & 10K & -- & -- & -- & -- & -- & -- \\
+\;+\smr{} & & -- & -- & -- & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table}

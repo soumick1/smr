@@ -58,7 +58,8 @@ reading repeated writes (DTU $0.441\!\to\!0.396$\,mm, better on every
 scan; novel views through a fixed rendering head ${+}0.24$\,dB), restores the
 $200$-frame regime to streaming models whose native
 memory cannot allocate it, and turns a frozen backbone into a training-free
-SLAM system that outperforms dedicated pipelines on 7-Scenes ($0.029$\,m).
+SLAM system with the best average error on 7-Scenes ($0.029$\,m on seq-01,
+$0.038$ on the full test split).
 \end{abstract}
 
 \section{Introduction}
@@ -447,13 +448,16 @@ scaffold size, window size) and the read's orderings in App.~\ref{app:ablations}
 Streaming \smr{} \emph{is} an online SLAM system, and 7-Scenes
 \citep{sevenscenes} lets us compare it, per trajectory ATE RMSE (m), against
 dedicated pipelines (Table~\ref{tab:slam}). With its strongest frozen backbone
-the memory outperforms every listed published system---$0.030$\,m streaming,
-$0.029$ with the final solve, against $0.042$--$0.086$ for dedicated
-pipelines---while remaining training-free and backbone-agnostic. The
-mechanism is the one this paper is about: chained windows alone reach
-$0.045$; verified closures and re-clamping recover a third of that error,
-most of it on the revisit-rich scenes (office $0.047\!\to\!0.026$, pumpkin
-$0.161\!\to\!0.061$). The same machinery improves the \emph{streaming}
+the memory has the best average of the table under both protocols: on seq-01
+of each scene $0.030$\,m online and $0.029$ with the final solve; on all 18
+trajectories of the standard test split $0.042$ and $0.038$, against
+$0.042$--$0.086$ for the dedicated pipelines. The mechanism is the one this
+paper is about, and the full split shows its shape honestly: chained windows
+reach $0.049$; the memory recovers most where the chain drifts most (pumpkin
+seq-01 $0.160\!\to\!0.077$, office seq-07 $0.144\!\to\!0.105$) and can cost
+a few centimetres where the chain was already good (9 of 18 trajectories
+improve online, 9 worsen slightly), the final solve recovering most of the
+latter. The same machinery improves the \emph{streaming}
 backbones within-session (StreamVGGT $0.133\!\to\!0.121$, STream3R
 $0.089\!\to\!0.079$), and the honest column stays in view: where a whole
 scene fits one native pass, the single pass is sometimes best---memory
@@ -468,11 +472,14 @@ here it serves as the memory's online test.
 \begin{table}[t]
 \centering\scriptsize
 \setlength{\tabcolsep}{4.5pt}
-\caption{7-Scenes SLAM, ATE RMSE (m)$\downarrow$ per scene. \smr{} on a
-single frozen backbone outperforms all listed calibrated and uncalibrated
-systems on average; the largest recoveries are the revisit-rich scenes
-(office, pumpkin). Streaming-backbone and multi-session results are given in
-the text.}
+\caption{7-Scenes SLAM, ATE RMSE (m)$\downarrow$ per scene. Published rows as
+reported by their authors. Ours in two protocols: seq-01 of each scene, and
+all 18 trajectories of the dataset's test split (per-scene mean of the
+trajectory ATEs). Under both, \smr{} on a single frozen backbone has the best
+average of the table; the largest recoveries are the trajectories whose
+chains drift most (pumpkin, office seq-07). Streaming-backbone and
+multi-session results are given in the text.}
+% TODO(protocol): confirm which of the two protocols MASt3R-SLAM / VGGT-SLAM report; keep that block first.
 \label{tab:slam}
 \begin{tabular}{@{}l ccccccc c@{}}
 \toprule
@@ -492,10 +499,15 @@ MASt3R-SLAM$^*$~\cite{mast3rslam} & 0.063 & 0.046 & 0.029 & 0.103 & 0.114 & 0.07
 VGGT-SLAM Sim(3), $w{=}32$~\cite{vggtslam} & 0.037 & 0.026 & 0.018 & 0.104 & 0.133 & 0.061 & 0.093 & 0.067 \\
 VGGT-SLAM SL(4), $w{=}32$~\cite{vggtslam} & 0.036 & 0.028 & 0.018 & 0.103 & 0.133 & 0.058 & 0.093 & 0.067 \\
 \midrule
-\multicolumn{9}{@{}l}{\emph{VGGT-$\Omega$ (ours; uncalibrated, training-free)}} \\
+\multicolumn{9}{@{}l}{\emph{VGGT-$\Omega$ (ours; uncalibrated, no backbone training) --- seq-01 of each scene}} \\
 \;$w{=}32$, Sim(3) (raw) & 0.025 & 0.024 & 0.012 & 0.047 & 0.161 & 0.026 & 0.020 & 0.045 \\
 \;+\smr{} & 0.022 & 0.026 & 0.012 & 0.026 & 0.077 & 0.028 & 0.022 & \textbf{0.030} \\
 \;+\smr{}+PGO & 0.021 & 0.031 & 0.013 & 0.031 & 0.061 & 0.025 & 0.022 & \textbf{0.029} \\
+\midrule
+\multicolumn{9}{@{}l}{\emph{VGGT-$\Omega$ (ours) --- all 18 trajectories of the standard test split, per-scene mean}} \\
+\;$w{=}32$, Sim(3) (raw) & 0.034 & 0.038 & 0.012 & 0.071 & 0.113 & 0.056 & 0.021 & 0.049 \\
+\;+\smr{} & 0.027 & 0.026 & 0.012 & 0.073 & 0.072 & 0.061 & 0.021 & 0.042 \\
+\;+\smr{}+PGO & 0.027 & 0.026 & 0.013 & 0.061 & 0.063 & 0.055 & 0.021 & \textbf{0.038} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -511,23 +523,23 @@ Gaussian head per backbone \citep{kerbl3dgs,splatt3r} on its point maps and
 images (${\approx}19$K Objaverse-LVIS objects \citep{objaverse}, $3\%$ of
 Objaverse where VGGT's internal set was $20\%$), and keep the head fixed across
 a backbone's rows: the read changes only the geometry the head receives.
-Table~\ref{tab:nvs} gives the eight rows over all 1{,}033 GSO objects. The
+Table~\ref{tab:nvs} gives the eight rows. The
 absolute level is that of the method class: a Gaussian head over frozen
-geometry lands where LGM, the Gaussian-based row of VGGT's table, lands, ten dB
-below trained transformer regressors that hallucinate what four inputs never
-show. Within the rule the memory behaves as on DTU and ETH3D. For the order-dependent
+geometry lands where LGM lands, ten dB below trained transformer regressors
+that hallucinate what four inputs never show. Within the rule the memory
+behaves as on DTU and ETH3D. For the order-dependent
 transformers the read improves the \emph{same} head with no retraining: VGGT
 $20.71\!\to\!20.95$\,dB (${+}0.24$; $95\%$ bootstrap interval
 $[{+}0.19,{+}0.29]$; better on $69\%$ of objects; LPIPS $-5.5\%$) and
 VGGT-$\Omega$ $18.89\!\to\!19.07$ (${+}0.18$, $[{+}0.09,{+}0.26]$). For
 $\pi^3$ the read is the identity to three decimals---the pass-through, measured. For the causal STream3R the mean falls by $0.18$\,dB while
 the median object is unchanged and $52\%$ improve: a minority with
-non-commensurable causal orderings pulls the mean down, the failure seen on
-ETH3D. The held-out Objaverse column repeats the ordering with smaller
+non-commensurable orderings pulls the mean down, as on ETH3D. The held-out Objaverse column repeats the ordering with smaller
 margins (VGGT ${+}0.09$, VGGT-$\Omega$ ${+}0.05$, $\pi^3$ identity,
 STream3R $-0.08$): its inputs are random training cameras rather than GSO's
 four evenly spaced views, so the orderings differ less and the read has less
-to reconcile.
+to reconcile. More orderings help only where they are commensurable: eight
+raise VGGT by a further $0.86$\,dB and lower STream3R (App.~\ref{app:ablations}).
 
 \input{tab_nvs}
 
@@ -543,9 +555,8 @@ backbone can re-measure. The in-window read presupposes commensurable passes;
 for models whose reconstruction depends on the reference frame or the causal
 order (Fast3R, StreamVGGT, STream3R) the orderings disagree and the read
 keeps too little or averages incompatible geometry---a failure we report
-rather than remove. Two-site consensus is defeated by structures that look
-alike \emph{and} agree geometrically (repetitive facades); one wrong closure
-survived the gate on a Fast3R subset. The bank's storage grows with the scene
+rather than remove. Two-site consensus is defeated by look-alike structures that also agree
+geometrically; one wrong closure survived the gate on a Fast3R subset. The bank's storage grows with the scene
 (in cards, not VRAM); we have not studied forgetting, and hyperparameters are
 conventional defaults without sweeps. Our NVS rows use our own renders and sit
 at the level of Gaussian heads over frozen geometry, ten dB below trained
@@ -561,21 +572,19 @@ elsewhere, and completed it with the only instrument these models leave
 us---themselves. The result is gradient-free, backbone-agnostic, bit-identical
 to the model within its window, and beyond it recovers most of what seams
 destroy, improves a single pass by reading repeated writes, gives streaming
-models the long regime their caches cannot afford, and runs as a SLAM system
-that outperforms dedicated ones. What remains is the memory's own biology:
+models the long regime their caches cannot afford, and runs as a SLAM system with the best average error on 7-Scenes. What remains is the memory's own biology:
 consolidation, forgetting, and whether a scaffold trained nowhere can, given
 the right measurements, remember anywhere.
 
 \vspace{-3mm}
 \subsubsection*{Reproducibility statement}
 \vspace{-1mm}
-All hyperparameters, one setting for every task and backbone, are listed
-with their motivation in App.~\ref{app:repro} (Table~\ref{tab:hparams});
-protocols are stated per benchmark (Secs.~\ref{sec:results-pose}--\ref{sec:nvs},
-Apps.~\ref{app:policies},~\ref{app:nvs}). Backbones use public weights
-unmodified, randomness is seeded, and every run writes a JSON report (metrics,
-accepted and rejected closures with residuals, solver diagnostics). Code,
-configurations, rendering and report scripts will be released.
+Hyperparameters (one setting for all tasks and backbones) are listed with
+their motivation in App.~\ref{app:repro}; protocols per benchmark in
+Secs.~\ref{sec:results-pose}--\ref{sec:nvs} and Apps.~\ref{app:policies},~\ref{app:nvs}.
+Backbones use public weights unmodified, randomness is seeded, and every run
+writes a JSON report (metrics, accepted and rejected closures, solver
+diagnostics); code and scripts will be released.
 
 \vspace{-3mm}
 \subsubsection*{Ethics statement}

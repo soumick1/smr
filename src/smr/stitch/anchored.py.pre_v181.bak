@@ -67,8 +67,6 @@ def _spread(centres):
 
 
 class AnchoredStitcher:
-    local_from = "anchored"   # v181 class attribute: pilot_a sets AnchoredStitcher.local_from; tests set it per instance
-
     def __init__(self, index=None, n_sites=2, recent_window=None,
                  top_proposals=5, desc_thresh=None, partner_gap=3,
                  site_rot_deg=10.0, site_dir_deg=25.0, extent_factor=3.0,
@@ -319,20 +317,6 @@ class AnchoredStitcher:
             P = cache.get(pass_idx, runner)["poses"]
             passes.append(pass_idx)
             pos = {gi: li for li, gi in enumerate(pass_idx)}
-            anchored_distortion = None
-            if getattr(self, "local_from", "anchored") == "plain" and anchors:
-                # v181: the window's own pass (cached from the raw chain) supplies its geometry; the enlarged pass is
-                # only a measurement of the revisit, carried into the plain pass's coordinates through the one
-                # similarity that maps the window frames of the anchored pass onto the plain pass
-                _cp = [pos[g] for g in idx]
-                P0 = cache.get(list(idx), runner)["poses"]
-                T_ap, _, info_ap = self._fit(P[_cp], P0)
-                anchored_distortion = dict(rot_deg=float(info_ap["rot_res_deg"].max()),
-                                           pos_rel=float(info_ap["pos_res"].max() / max(float(info_ap["spread"]), 1e-9)))
-                P = P.copy()
-                P[_cp] = P0
-                for g in anchors:
-                    P[pos[g]] = sim3.apply(T_ap, P[pos[g]][None])[0]
             chunk_pos = [pos[g] for g in idx]
             for gi in new:
                 local[gi] = P[pos[gi]]
@@ -577,7 +561,7 @@ class AnchoredStitcher:
             prev_scale = float(S[0])
             for gi in new:
                 bind(gi, moved[pos[gi]], k)
-            if self.smooth_junctions and loop and loop["accepted"] and self.correction != "none":
+            if self.smooth_junctions and loop and loop["accepted"]:
                 # Relaxing whole chunks leaves a step at the junction: the
                 # overlap frames sit where chunk k-1 put them while chunk
                 # k's new frames sit where the closure put them (measured
@@ -592,7 +576,7 @@ class AnchoredStitcher:
                     T = stored[g] @ np.block([[C[1], C[2][:, None]], [np.zeros((1, 3)), 1.0]])
                     stored[g] = T
                     self.index.update_pose(g, T)
-            ev = dict(chunk=k, anchored_distortion=anchored_distortion, n_new=len(new), n_overlap=len(overlap),
+            ev = dict(chunk=k, n_new=len(new), n_overlap=len(overlap),
                       n_overlap_inliers=int(keep_ov.sum()), sites=site_log,
                       loop=loop, session_start=bool(session_start),
                       recovering=bool(recovering),
