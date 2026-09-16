@@ -81,7 +81,9 @@ def find_gt(report, report_path, a, debug=False):
             pat = pat.strip()
             if "=" in pat:                                   # dataset-prefixed: 7scenes=7scenes_{stem}_seq01.npz
                 ds, pat = pat.split("=", 1)
-                if _norm(ds) not in dataset and _norm(ds) not in stem:
+                ALIAS = {"7scenes": ("7scenes", "sevenscenes"), "sevenscenes": ("7scenes", "sevenscenes"), "co3d": ("co3d",)}
+                names = ALIAS.get(_norm(ds), (_norm(ds),))
+                if not any(n in dataset or n in stem for n in names):
                     continue
             cand = pathlib.Path(a.gt_dir) / pat.format(stem=stem_raw, scene=report.get("scene", ""))
             if cand.exists():

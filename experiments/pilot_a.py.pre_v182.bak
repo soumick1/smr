@@ -44,6 +44,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from smr.eval.trajectory import (ate_rmse, auc_at, find_revisit_pairs,    # noqa: E402
                                  pairwise_pose_errors, rotation_angle_deg,
                                  summarise_long)
+from smr.utils import provenance  # noqa: E402  (v177)
 from smr.stitch import (AnchoredStitcher, BackboneRunner, DescriptorIndex,  # noqa: E402
                         PassCache, ScaffoldIndex, image_descriptors,
                         keyframe_indices, make_chunks, posegraph, probe,
@@ -176,16 +177,24 @@ def main():
     ap.add_argument("--site-agree", default="1e9,1e9",
                     help="v75 rule (A/B: mixed): max rot(deg),pos(spreads) disagreement "
                          "between two sites before the closure is demoted; default off")
+    # -- v177: operative verification constants as flags (defaults = every existing run)
+    ap.add_argument("--site-rot", type=float, default=10.0, help="per-site gate: max rotation residual of the site's internal pose (deg)")
+    ap.add_argument("--site-dir", type=float, default=25.0, help="per-site gate: max translation-direction residual (deg)")
+    ap.add_argument("--extent-factor", type=float, default=3.0, help="per-site gate: max distance from the window centroid (spreads)")
+    ap.add_argument("--budget-rot", default="10,3,45", help="two-site drift budget: r0,r1,rmax -> min(rmax, r0 + r1*n_stretch) deg")
+    ap.add_argument("--budget-pos", default="1.0,0.5", help="two-site drift budget: p0,p1 -> p0 + p1*n_stretch spreads")
+    ap.add_argument("--budget-logscale", type=float, default=0.5)
+    ap.add_argument("--tight-rot", default="3,1,15", help="single-site budget (a lone site may only nudge)")
+    ap.add_argument("--tight-pos", default="0.5,0.15")
+    ap.add_argument("--no-smooth-junctions", action="store_true", help="no per-frame blend of the previous window's overlap at a closure")
+    ap.add_argument("--local-from", default="anchored", choices=["anchored", "plain"],
+                    help="window geometry from the enlarged anchored pass (default, all runs so far) or from the window's own pass (v181)")
+    ap.add_argument("--top-proposals", type=int, default=5)
     ap.add_argument("--no-robust-batch", action="store_true",
                     help="ablation: batch solve without outlier-edge rejection")
     ap.add_argument("--remeasure", action="store_true",
                     help="verify each site with a 4-frame second pass "
                          "(ablation; off by default, see notes)")
-    ap.add_argument("--known-K", nargs=4, type=float, default=None, metavar=("FX", "FY", "CX", "CY"),
-                    help="CALIBRATED dense-edge re-measurement: use these intrinsics (given at --known-K-res) instead of the backbone's "
-                         "predicted ones when unprojecting depth for the smr_pgo_dense row. 7-Scenes: 585 585 320 240 at 640 480. "
-                         "Has NO effect on the pose-based rows (chained / smr / smr_pgo), which never use intrinsics.")
-    ap.add_argument("--known-K-res", nargs=2, type=float, default=[640, 480], metavar=("W", "H"))
     ap.add_argument("--index", default="template", choices=["flat", "template", "dynamics"],
                     help="memory index: flat = cosine over cues (no scaffold; the key-value baseline); template = scaffold with "
                          "analytic grid-code addresses (default, what the tables use); dynamics = addresses read from the settled "
@@ -226,6 +235,7 @@ def main():
     ap.add_argument("--chunk-distortion", type=float, default=0.1)
     ap.add_argument("--sim-frames", type=int, default=40, help="frames per lap")
     a = ap.parse_args()
+    AnchoredStitcher.local_from = a.local_from   # v181 (class attribute; every stitcher instance reads it)
 
     simulated = a.simulate_chunks or a.backbone == "synthetic"
     if a.keyframe_stride is None:
@@ -300,7 +310,7 @@ def main():
     verdict = probe.gate(rows_probe, ref, ratio=a.gate_ratio, floor=a.gate_floor)
     probe.print_probe(rows_probe, ref, verdict)
     ceiling = ceiling_probe(key, paths, gt, a, cache, runner) if a.ceiling else None
-    report = dict(SIMULATED=simulated, index=a.index, descriptor=a.descriptor, known_K=a.known_K,
+    report = dict(SIMULATED=simulated, index=a.index, descriptor=a.descriptor,
                   WARNING=("harness validation only; no model executed"
                            if simulated else None),
                   scene=meta["scene"], dataset=meta["dataset"],
@@ -309,7 +319,8 @@ def main():
                   overlap=a.overlap, sites=a.sites, n_chunks=len(chunks),
                   n_revisit_pairs=len(revisits), reference=ref,
                   probe=rows_probe, gate=dict(passed=verdict[0], **verdict[1]),
-                  ceiling=ceiling, rows=[])
+                  ceiling=ceiling, rows=[],
+                  provenance=provenance.run_record(a, backbone=a.backbone))
     if a.probe_only:
         _write(report, a, simulated, meta)
         return
@@ -351,7 +362,14 @@ def main():
     sa = [float(x) for x in a.site_agree.split(",")]
     common = dict(n_sites=a.sites, remeasure=a.remeasure, verbose=a.verbose,
                   desc_thresh=a.desc_thresh, mutual_nn=a.mutual_nn,
-                  site_agree_rot=sa[0], site_agree_pos=sa[1])
+                  site_agree_rot=sa[0], site_agree_pos=sa[1],
+                  site_rot_deg=a.site_rot, site_dir_deg=a.site_dir, extent_factor=a.extent_factor,
+                  budget_rot=tuple(float(x) for x in a.budget_rot.split(",")),
+                  budget_pos=tuple(float(x) for x in a.budget_pos.split(",")),
+                  budget_logscale=a.budget_logscale,
+                  tight_rot=tuple(float(x) for x in a.tight_rot.split(",")),
+                  tight_pos=tuple(float(x) for x in a.tight_pos.split(",")),
+                  smooth_junctions=not a.no_smooth_junctions, top_proposals=a.top_proposals)
 
     def scaffold():
         if a.index == "flat":
@@ -383,7 +401,6 @@ def main():
         if "smr_pgo" in want:
             t2 = time.time()
             pg, info = posegraph.solve(r, chunks, robust_reject=not a.no_robust_batch)
-            pgo_solve_secs = round(time.time() - t2, 3)       # the optimizer alone (pgo_secs below may include optional extra rows)
             if "smr_pgo_wide" in want:
                 # re-measure every accepted loop edge with ONE wide joint pass
                 # (8+8 spatially closest frames of the two chunks, chosen from
@@ -456,26 +473,14 @@ def main():
                 t3 = time.time()
                 bb_d = get_backbone(a.backbone, device=a.device)
                 kf_paths = [paths[i] for i in key]
-                infer_dense = lambda ps: bb_d.infer(ps)
-                if a.known_K is not None:                 # calibrated variant: replace predicted intrinsics by the known ones
-                    fx, fy, cx, cy = a.known_K; W0, H0 = a.known_K_res; shown = [False]
-
-                    def infer_dense(ps, _inf=bb_d.infer):
-                        o = _inf(ps); H, W = o.depth.shape[1:3]; sx, sy = W / W0, H / H0
-                        Kk = np.array([[fx * sx, 0, cx * sx], [0, fy * sy, cy * sy], [0, 0, 1.0]])
-                        if not shown[0]:
-                            Kp = o.intrinsics if o.intrinsics.ndim == 2 else o.intrinsics[0]
-                            print(f"    [calibrated] depth {W}x{H}; predicted K f=({Kp[0,0]:.1f},{Kp[1,1]:.1f}) c=({Kp[0,2]:.1f},{Kp[1,2]:.1f})"
-                                  f" -> known f=({Kk[0,0]:.1f},{Kk[1,1]:.1f}) c=({Kk[0,2]:.1f},{Kk[1,2]:.1f})"); shown[0] = True
-                        o.intrinsics = np.repeat(Kk[None], o.depth.shape[0], 0) if o.intrinsics.ndim == 3 else Kk
-                        return o
-                rd = dense_edges.remeasure(r, chunks, kf_paths, infer_dense, verbose=True)
+                rd = dense_edges.remeasure(r, chunks, kf_paths,
+                                           lambda ps: bb_d.infer(ps), verbose=True)
                 pgd, infod = posegraph.solve(rd, chunks, robust_reject=not a.no_robust_batch)
                 add_row("smr_pgo_dense", pgd, r["passes"],
                         dict(pgo_secs=round(time.time() - t3, 2), pgo_cost=infod["cost"],
                              n_dropped_edges=infod.get("n_dropped", 0), **loops_of(r)))
             add_row("smr_pgo", pg, r["passes"],
-                    dict(pgo_secs=round(time.time() - t2, 2), pgo_solve_secs=pgo_solve_secs, pgo_cost=info["cost"],
+                    dict(pgo_secs=round(time.time() - t2, 2), pgo_cost=info["cost"],
                          n_dropped_edges=info.get("n_dropped", 0), **loops_of(r)))
     if "classical" in want:
         st = AnchoredStitcher(DescriptorIndex(), correction="none", **common)

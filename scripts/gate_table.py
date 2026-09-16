@@ -17,8 +17,8 @@ ap.add_argument("--md", default=None); ap.add_argument("--row", default="smr"); 
 ap.add_argument("--gt-pattern", default=None, help="e.g. '7scenes=7scenes_{stem}_seq01.npz,co3d=co3d_full/co3d_{stem}.npz'")
 a = ap.parse_args()
 root = pathlib.Path(a.root)
-lines = ["| dataset | variant | n | raw | +SMR | +SMR+PGO | closures/seq | precision covis | recall covis | false (covis) | useful | harmful | anchored passes |",
-         "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+lines = ["| dataset | variant | n | raw | +SMR | +SMR+PGO | closures/seq | recall@1 | recall@5 | precision covis | recall covis | false (covis) | useful | harmful | anchored passes |",
+         "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
 for ds in sorted(p.name for p in root.iterdir() if p.is_dir()):
     metric = "ate_rmse" if "7scenes" in ds else "auc30"
     variants = a.variants or sorted(p.name for p in (root / ds).iterdir() if p.is_dir())
@@ -53,6 +53,7 @@ for ds in sorted(p.name for p in root.iterdir() if p.is_dir()):
         S = CR.summarise(recs, has_gt) if recs else {}
         fm = (lambda x: f"{x:.3f}") if metric == "ate_rmse" else (lambda x: f"{x:.1f}")
         lines.append(f"| {ds} | {v} | {len(raw)} | {fm(np.mean(raw))} | {fm(np.mean(smr))} | {fm(np.mean(pgo))} | {np.mean(loops):.1f} | "
+                     f"{CR.fmt(S.get('recall_at_1'))} | {CR.fmt(S.get('recall_at_5'))} | "
                      f"{CR.fmt(S.get('closure_precision_covis'))} | {CR.fmt(S.get('closure_recall_covis'))} | {CR.fmt(S.get('false_closures_covis'))} | "
                      f"{CR.fmt(S.get('useful'))}/{CR.fmt(S.get('closures_scored'))} | {CR.fmt(S.get('harmful'))} | {S.get('anchored_passes_attempted', '-')} |")
 out = "\n".join(lines); print(out)

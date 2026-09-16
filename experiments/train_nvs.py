@@ -60,11 +60,13 @@ def main():
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--n-in", type=int, default=4); ap.add_argument("--n-tgt", type=int, default=4)
     ap.add_argument("--lpips", type=float, default=0.1, help="LPIPS weight (0 disables; saves the VGG load)")
-    ap.add_argument("--reads", type=int, default=1, help="training geometry: 1 = raw pass (default)")
+    ap.add_argument("--reads", type=int, default=1, help="training geometry: 1 = raw pass (default); 4 = the in-window read in the loop")
+    ap.add_argument("--val-reads", type=int, default=0, help="reads used by the in-training validation (0 = same as --reads)")
     ap.add_argument("--source", default="auto", choices=["auto", "depth", "pointhead"])
     ap.add_argument("--val-every", type=int, default=2000); ap.add_argument("--val-objects", type=int, default=20)
     ap.add_argument("--ckpt-every", type=int, default=1000)
     ap.add_argument("--resume", action="store_true"); ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--save-every", type=int, default=0, help="also keep ckpt_step<N>.pt every N steps (for training-curve evaluations)")
     ap.add_argument("--backbone-kw", action="append", default=[])
     ap.add_argument("--smoke", action="store_true")
     a = ap.parse_args()
@@ -116,7 +118,7 @@ def main():
             for o in val:
                 d = G.load_views(o); V = len(d["paths"]); rr = random.Random(zlib.crc32(o.name.encode()))
                 ids = rr.sample(range(V), a.n_in + a.n_tgt)
-                pred, gt, n = step_batch(bb, head, G, d, np.array(ids[: a.n_in]), np.array(ids[a.n_in:]), d["res"], device, 1, a.source)
+                pred, gt, n = step_batch(bb, head, G, d, np.array(ids[: a.n_in]), np.array(ids[a.n_in:]), d["res"], device, a.val_reads or a.reads, a.source)
                 if pred is None:
                     continue
                 rows.append([psnr(pred, gt).mean().item(), ssim(pred, gt).item(), perc(pred, gt).item() if perc else float("nan")])
@@ -150,6 +152,8 @@ def main():
             log(f"step {step}: loss {m[0]:.4f}  psnr {m[1]:.2f}  gaussians {int(m[2]):,}  {dt:.2f} s/step")
         if step % a.ckpt_every == 0 or step == a.steps:
             torch.save(dict(head=head.state_dict(), opt=opt.state_dict(), step=step, best=best, args=vars(a)), out / "ckpt_last.pt")
+        if a.save_every and step % a.save_every == 0:
+            torch.save(dict(head=head.state_dict(), step=step, args=vars(a)), out / f"ckpt_step{step}.pt")
         if step % a.val_every == 0 or step == a.steps:
             v = validate("val")
             if v > best:

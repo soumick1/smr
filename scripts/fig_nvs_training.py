@@ -41,6 +41,60 @@ def ema(x, alpha=0.1):
     return y
 
 
+def compare(a):
+    """Two heads of the same backbone: trained on raw geometry (shipped) vs trained on the read's geometry. Curves are cut at
+    the shorter run's step count so the comparison is at equal budget. Panels: loss, training PSNR, validation PSNR
+    (each head validated on the geometry it was trained on), and the 2x2 final GSO / held-out PSNR matrix if the jsonl exist."""
+    import json
+    bb = a.backbones[0]; raw_dir = pathlib.Path(a.nvs) / bb; smr_dir = pathlib.Path(a.compare)
+    R, S = read_metrics(raw_dir / "metrics.csv"), read_metrics(smr_dir / "metrics.csv")
+    Rv, Sv = read_val(raw_dir / "val.csv"), read_val(smr_dir / "val.csv")
+    T = min(R["step"].max(), S["step"].max())
+    cut = lambda m: {k: v[m["step"] <= T] for k, v in m.items()}
+    R, S, Rv, Sv = cut(R), cut(S), cut(Rv), cut(Sv)
+    fig, ax = plt.subplots(2, 2, figsize=(a.width_in, a.width_in * 0.62)); ax = ax.ravel()
+    lab = {"raw": f"{NAMES.get(bb, bb)} head trained on raw geometry", "smr": f"{NAMES.get(bb, bb)} head trained on +SMR geometry (read in the loop)"}
+    for m, key, c in ((R, "raw", "tab:blue"), (S, "smr", "tab:red")):
+        ax[0].plot(m["step"], m["loss"], color=c, alpha=0.18, lw=0.6); ax[0].plot(m["step"], ema(m["loss"]), color=c, lw=1.4, label=lab[key])
+        ax[1].plot(m["step"], m["psnr"], color=c, alpha=0.18, lw=0.6); ax[1].plot(m["step"], ema(m["psnr"]), color=c, lw=1.4, label=lab[key])
+    ax[0].set_yscale("log"); ax[0].set_title("(a) training loss"); ax[0].set_ylabel("$\\ell_1$ + 0.5 LPIPS"); ax[0].legend(frameon=False, fontsize=6)
+    ax[1].set_title("(b) training PSNR"); ax[1].set_ylabel("dB")
+    ax[2].plot(Rv["step"], Rv["psnr"], color="tab:blue", marker="o", ms=3, lw=1.3, label="raw-trained, validated on raw geometry")
+    ax[2].plot(Sv["step"], Sv["psnr"], color="tab:red", marker="o", ms=3, lw=1.3, label="+SMR-trained, validated on +SMR geometry")
+    if a.floor > 0: ax[2].axhline(a.floor, color="0.4", ls="--", lw=0.9, label=f"untrained head ({a.floor:.2f} dB)")
+    ax[2].set_title("(c) held-out PSNR during training (20 objects)"); ax[2].set_ylabel("dB"); ax[2].legend(frameon=False, fontsize=6, loc="center right")
+    for x in ax[:3]: x.set_xlabel("step"); x.set_xlim(0, T)
+    # (d) 2x2 matrix from the final evaluations, if present
+    def mean_psnr(path):
+        path = pathlib.Path(path)
+        if not path.exists(): return None
+        v = [json.loads(l)["psnr"] for l in open(path) if l.strip() and "psnr" in json.loads(l)]
+        return np.mean(v) if v else None
+    cells = {}
+    for split, n in (("gso", "GSO"), ("val", "held-out")):
+        for tr, d in (("raw", raw_dir), ("+SMR", smr_dir)):
+            for ev, r in (("raw", 1), ("+SMR", 4)):
+                cells[(split, tr, ev)] = mean_psnr(d / f"{split}_reads{r}.jsonl")
+    ax[3].axis("off")
+    if any(v is not None for v in cells.values()):
+        rows = [["train \\ eval", "eval raw", "eval +SMR"]]
+        for split, n in (("gso", "GSO"), ("val", "held-out")):
+            for tr in ("raw", "+SMR"):
+                f = lambda v: "--" if v is None else f"{v:.2f}"
+                rows.append([f"{n}: trained {tr}", f(cells[(split, tr, 'raw')]), f(cells[(split, tr, '+SMR')])])
+        tb = ax[3].table(cellText=rows[1:], colLabels=rows[0], loc="center", cellLoc="center"); tb.auto_set_font_size(False); tb.set_fontsize(6.5); tb.scale(1, 1.4)
+        ax[3].set_title("(d) final PSNR (dB): training geometry x evaluation geometry")
+    else:
+        ax[3].text(0.5, 0.5, "final evaluations pending", ha="center", va="center", fontsize=7)
+    fig.tight_layout(w_pad=2.0, h_pad=2.0)
+    out = pathlib.Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(out) + ".pdf"); fig.savefig(str(out) + ".png", dpi=a.dpi)
+    print(f"raw head: {int(R['step'].max())} steps, final val {Rv['psnr'][-1]:.2f}; +SMR-trained head: {int(S['step'].max())} steps, final val {Sv['psnr'][-1]:.2f}")
+    for k, v in cells.items():
+        if v is not None: print(k, f"{v:.2f}")
+    print(f"wrote {out}.pdf/.png")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--nvs", default="outputs/nvs"); ap.add_argument("--backbones", nargs="+", default=["vggt_omega", "vggt", "pi3", "stream3r"])
@@ -48,7 +102,10 @@ def main():
     ap.add_argument("--width-in", type=float, default=8.27, help="figure width in inches (8.27 = A4 width)")
     ap.add_argument("--dpi", type=int, default=600)
     ap.add_argument("--out", default="outputs/figures/nvs_training")
+    ap.add_argument("--compare", default="", help="directory of a head trained WITH the read in the loop (train_with_smr.sh); makes the raw-vs-SMR training comparison figure for --backbones[0]")
     a = ap.parse_args()
+    if a.compare:
+        return compare(a)
     M = {bb: read_metrics(pathlib.Path(a.nvs) / bb / "metrics.csv") for bb in a.backbones if (pathlib.Path(a.nvs) / bb / "metrics.csv").exists()}
     V = {bb: read_val(pathlib.Path(a.nvs) / bb / "val.csv") for bb in a.backbones if (pathlib.Path(a.nvs) / bb / "val.csv").exists()}
     fig, axes = plt.subplots(2, 3, figsize=(a.width_in, a.width_in * 0.56)); ax = axes.ravel()
