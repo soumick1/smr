@@ -1,0 +1,605 @@
+#!/usr/bin/env python3
+"""Pilot A -- long-horizon global consistency: the experiment the paper turns on.
+
+A long sequence is chunked into overlapping windows; each window is one
+backbone pass in ITS OWN frame and gauge.  The rows differ only in how the
+passes are turned into one global trajectory:
+
+  chained     Sim(3) onto the previous chunk's poses, chained.  The naive
+              baseline; its error compounds.
+  smr         memory-anchored streaming (src/smr/stitch/anchored.py): the
+              SMR memory proposes anchor views from EARLIER chunks by
+              appearance and place, the backbone runs on chunk ∪ anchors,
+              the chunk is placed against the anchors' stored poses and the
+              exposed drift is distributed over the loop.  O(1) per chunk,
+              no optimisation.  With --sites 0 this IS the chained row
+              (tested to machine precision).
+  smr_pgo     batch Sim(3) pose-graph optimisation over the identical
+              measurements smr recorded: the batch upper bound.
+  classical   descriptor-NN loop detection + batch PGO, no scaffold: the
+              classical back-end, for the reviewer who asks what the
+              memory adds beyond a nearest-neighbour index.
+  smr_jump, plain   ablations (no correction distribution / plain index).
+
+Before any row: the per-chunk PROBE.  Each chunk is scored on its own
+against GT and compared with a reference pass spread over the sequence.
+If the backbone fails inside chunks, nothing downstream is a measurement
+of any stitcher, and the run says so.
+
+    # 7-Scenes / TUM (see scripts/indoor_gt_poses.py), one backbone per process
+    python experiments/pilot_a.py --gt data/gt/7scenes_chess_seq01.npz \\
+        --backbone vggt --keyframe-stride 10 --chunk 16 --overlap 8 --sites 2
+
+    # harness validation with no GPU: rendered two-lap world, SIMULATED
+    python experiments/pilot_a.py --backbone synthetic --simulate-chunks \\
+        --chunk-noise 0.01 --chunk-distortion 0.1
+"""
+import argparse, json, pathlib, sys, time
+
+import numpy as np
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from smr.eval.trajectory import (ate_rmse, auc_at, find_revisit_pairs,    # noqa: E402
+                                 pairwise_pose_errors, rotation_angle_deg,
+                                 summarise_long)
+from smr.utils import provenance  # noqa: E402  (v177)
+from smr.stitch import (AnchoredStitcher, BackboneRunner, DescriptorIndex,  # noqa: E402
+                        PassCache, ScaffoldIndex, image_descriptors,
+                        keyframe_indices, make_chunks, posegraph, probe,
+                        stitch_chained)
+
+ROW_ORDER = ["chained", "smr", "smr_pgo", "smr_pgo_wide", "smr_pgo_lba", "smr_pgo_dense", "classical", "smr_jump", "plain"]
+
+
+def load_inputs(a):
+    """Returns (paths, gt_full, descriptors_fn, runner_factory, meta)."""
+    if a.backbone == "synthetic":
+        from smr.stitch.simulate import LoopWorld
+        w = LoopWorld(n_per_lap=a.sim_frames, laps=2, H=96, W=96, seed=a.seed,
+                      jitter=0.02)
+        meta = dict(scene="synthetic-two-lap-room", dataset="synthetic",
+                    metric=False)
+        runner = w.runner(noise=a.chunk_noise, distortion=a.chunk_distortion,
+                          seed=a.seed + 1)
+        return None, w.gt, (lambda key, runner=None: w.descriptors[key]), runner, meta
+    if not a.gt:
+        raise SystemExit("pass --gt (from scripts/indoor_gt_poses.py or "
+                         "scripts/co3d_gt_poses.py)")
+    npz = np.load(a.gt, allow_pickle=True)
+    if "image_paths" not in npz:
+        raise SystemExit("the gt npz must carry image_paths (pose i belongs to "
+                         "image i)")
+    paths = [str(s) for s in npz["image_paths"]]
+    gt = np.asarray(npz["poses"], float)
+    ds = str(npz["dataset"]) if "dataset" in npz else "unknown"
+    meta = dict(scene=str(npz["scene"]) if "scene" in npz else pathlib.Path(a.gt).stem,
+                sequence=str(npz["sequence"]) if "sequence" in npz else "",
+                dataset=ds, metric=ds in ("sevenscenes", "tum"))
+    if a.simulate_chunks:
+        from smr.stitch import SimulatedRunner
+        runner = SimulatedRunner(gt, noise=a.chunk_noise,
+                                 distortion=a.chunk_distortion, seed=a.seed + 1)
+    else:
+        runner = None                      # built after keyframing (paths)
+
+    def desc_fn(key, runner=None):
+        cache = (pathlib.Path(a.cache).with_suffix(f".desc_{a.descriptor}.npy")
+                 if a.cache else None)
+        sel = [paths[i] for i in key]
+        if cache is not None and cache.exists():
+            d = np.load(cache, allow_pickle=True).item()
+            if d.get("paths") == sel:
+                return d["desc"]
+        print(f"  computing {len(sel)} {a.descriptor} view descriptors ...")
+        if a.descriptor == "dino":
+            from smr.stitch.passes import dino_descriptors
+            desc = dino_descriptors(sel, device=a.device)
+        elif a.descriptor == "feat":
+            from smr.stitch.passes import feat_descriptors
+            bb = getattr(runner, "backbone", None) or getattr(runner, "bb", None)
+            if bb is None:
+                raise SystemExit("--descriptor feat needs the backbone runner (real backbone), built before descriptors")
+            desc = feat_descriptors(sel, bb, device=a.device)
+        elif a.descriptor not in ("rgb", "dino", "feat"):
+            from smr.stitch.vpr_descriptors import vpr_descriptors   # v182: eigenplaces, cosplace, salad, boq, netvlad, mixvpr, a+b, kind@N
+            desc = vpr_descriptors(sel, a.descriptor, device=a.device)
+        else:
+            desc = image_descriptors(sel)
+        if cache is not None:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            np.save(cache, dict(paths=sel, desc=desc), allow_pickle=True)
+        return desc
+
+    return paths, gt, desc_fn, runner, meta
+
+
+def ceiling_probe(key, paths, gt, a, cache, runner):
+    """Largest single pass that fits on the GPU, frames SPREAD over the
+    sequence, and its quality: the backbone's own global-consistency
+    ceiling and the point past which chunking is not optional."""
+    n = len(key)
+    print(f"\n  ceiling: single pass over all {n} keyframes ...")
+    while n >= 4:
+        step = max(1, len(key) // n)
+        sub = list(range(0, len(key), step))[:n]
+        try:
+            d = cache.get(sub, runner)
+        except Exception as e:                       # OOM lands here
+            msg = str(e).lower()
+            if "out of memory" in msg or "cuda" in msg or "alloc" in msg:
+                print(f"    {n} frames: OOM -> halving")
+                n //= 2
+                try:
+                    import torch; torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                continue
+            raise
+        P = d["poses"]
+        rra, rta = pairwise_pose_errors(P, gt[sub])
+        r = dict(n=len(sub), ate=ate_rmse(P, gt[sub]), auc30=auc_at(rra, rta),
+                 rra_med=float(np.median(rra)), secs=d["secs"],
+                 peak_gb=d["peak_gb"])
+        print(f"    fits: {r['n']} frames, AUC@30 {r['auc30']:.1f}, ATE "
+              f"{r['ate']:.4f}, {r['secs']:.1f}s, peak {r['peak_gb']:.2f} GB")
+        return r
+    return dict(n=0)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--gt", default="", help="npz with (K,4,4) c2w 'poses' + image_paths")
+    ap.add_argument("--backbone", default="vggt")
+    ap.add_argument("--keyframe-stride", type=int, default=None,
+                    help="evaluate every Nth frame (default 10; 1 for the "
+                         "synthetic world, which is already keyframed). "
+                         "Consecutive video frames are a near-degenerate "
+                         "baseline for these models; keyframes give each "
+                         "chunk a well-conditioned arc.")
+    ap.add_argument("--chunk", type=int, default=16)
+    ap.add_argument("--overlap", type=int, default=8)
+    ap.add_argument("--max-frames", type=int, default=0,
+                    help="use only the first N keyframes (length sweep)")
+    ap.add_argument("--sites", type=int, default=2,
+                    help="anchor sites per chunk (2 frames each) proposed by "
+                         "memory; 0 reproduces the chained baseline")
+    ap.add_argument("--rows", default="chained,smr,smr_pgo,classical")
+    ap.add_argument("--correction", default="relax",
+                    choices=["relax", "distribute", "jump", "none"],
+                    help="how an accepted closure is applied in the smr row")
+    ap.add_argument("--desc-thresh", type=float, default=None,
+                    help="descriptor cosine gate for proposals. Default: 0.5 "
+                         "absolute for DINO (the adaptive 5th-percentile-of-"
+                         "adjacent rule lands near 0.85 at stride 5 and "
+                         "proposed nothing -- 0 loops on chess seq-01); "
+                         "adaptive for the rgb descriptor")
+    ap.add_argument("--mutual-nn", action="store_true",
+                    help="v75 rule (A/B: mixed): mutual-nearest-neighbour test on proposals")
+    ap.add_argument("--site-agree", default="1e9,1e9",
+                    help="v75 rule (A/B: mixed): max rot(deg),pos(spreads) disagreement "
+                         "between two sites before the closure is demoted; default off")
+    # -- v177: operative verification constants as flags (defaults = every existing run)
+    ap.add_argument("--site-rot", type=float, default=10.0, help="per-site gate: max rotation residual of the site's internal pose (deg)")
+    ap.add_argument("--site-dir", type=float, default=25.0, help="per-site gate: max translation-direction residual (deg)")
+    ap.add_argument("--extent-factor", type=float, default=3.0, help="per-site gate: max distance from the window centroid (spreads)")
+    ap.add_argument("--budget-rot", default="10,3,45", help="two-site drift budget: r0,r1,rmax -> min(rmax, r0 + r1*n_stretch) deg")
+    ap.add_argument("--budget-pos", default="1.0,0.5", help="two-site drift budget: p0,p1 -> p0 + p1*n_stretch spreads")
+    ap.add_argument("--budget-logscale", type=float, default=0.5)
+    ap.add_argument("--tight-rot", default="3,1,15", help="single-site budget (a lone site may only nudge)")
+    ap.add_argument("--tight-pos", default="0.5,0.15")
+    ap.add_argument("--no-smooth-junctions", action="store_true", help="no per-frame blend of the previous window's overlap at a closure")
+    ap.add_argument("--local-from", default="anchored", choices=["anchored", "plain"],
+                    help="window geometry from the enlarged anchored pass (default, all runs so far) or from the window's own pass (v181)")
+    ap.add_argument("--top-proposals", type=int, default=5)
+    ap.add_argument("--no-robust-batch", action="store_true",
+                    help="ablation: batch solve without outlier-edge rejection")
+    ap.add_argument("--remeasure", action="store_true",
+                    help="verify each site with a 4-frame second pass "
+                         "(ablation; off by default, see notes)")
+    ap.add_argument("--known-K", nargs=4, type=float, default=None, metavar=("FX", "FY", "CX", "CY"),
+                    help="CALIBRATED dense-edge re-measurement: use these intrinsics (given at --known-K-res) instead of the backbone's "
+                         "predicted ones when unprojecting depth for the smr_pgo_dense row. 7-Scenes: 585 585 320 240 at 640 480. "
+                         "Has NO effect on the pose-based rows (chained / smr / smr_pgo), which never use intrinsics.")
+    ap.add_argument("--known-K-res", nargs=2, type=float, default=[640, 480], metavar=("W", "H"))
+    ap.add_argument("--index", default="template", choices=["flat", "template", "dynamics"],
+                    help="memory index: flat = cosine over cues (no scaffold; the key-value baseline); template = scaffold with "
+                         "analytic grid-code addresses (default, what the tables use); dynamics = addresses read from the settled "
+                         "attractor bumps (identical up to the decode floor, ~100x slower)")
+    ap.add_argument("--descriptor", default=None,
+                    help="place descriptor: rgb | dino | feat | eigenplaces | cosplace | salad | boq | netvlad | mixvpr | a+b | kind@N; DINOv2 ViT-S/14 CLS (default for "
+                         "real backbones; pooled RGB found 1 closure in 34 "
+                         "chunks where DINO found 10) or pooled RGB (no "
+                         "model; default for the synthetic world)")
+    ap.add_argument("--probe-only", action="store_true")
+    ap.add_argument("--ceiling", action="store_true",
+                    help="also measure the largest single pass that fits")
+    ap.add_argument("--ref-size", type=int, default=10)
+    ap.add_argument("--gate-ratio", type=float, default=0.6)
+    ap.add_argument("--gate-floor", type=float, default=40.0)
+    ap.add_argument("--revisit-dist", type=float, default=None,
+                    help="GT centre distance defining a revisit (metres on "
+                         "7-Scenes/TUM; default 10%% of the bbox diagonal)")
+    ap.add_argument("--revisit-angle", type=float, default=30.0)
+    ap.add_argument("--revisit-gap", type=int, default=0,
+                    help="min keyframe gap for a revisit (default 2*chunk)")
+    ap.add_argument("--rpe-dist", type=float, default=1.0,
+                    help="RPE over this GT path length (metric datasets)")
+    ap.add_argument("--N-h", type=int, default=2048)
+    ap.add_argument("--torus-N", type=int, default=32)
+    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--cache", default="",
+                    help="pass cache (.npy); reruns never re-infer a pass")
+    ap.add_argument("--json", default="")
+    ap.add_argument("--save-est", default="", help="npz to store per-row trajectories + chunks for points_suite --pilot")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--verbose", action="store_true")
+    # harness validation only
+    ap.add_argument("--simulate-chunks", action="store_true",
+                    help="derive passes from GT + noise (no model); for "
+                         "validating the harness, never for a result")
+    ap.add_argument("--chunk-noise", type=float, default=0.01)
+    ap.add_argument("--chunk-distortion", type=float, default=0.1)
+    ap.add_argument("--sim-frames", type=int, default=40, help="frames per lap")
+    a = ap.parse_args()
+    AnchoredStitcher.local_from = a.local_from   # v181 (class attribute; every stitcher instance reads it)
+
+    simulated = a.simulate_chunks or a.backbone == "synthetic"
+    if a.keyframe_stride is None:
+        a.keyframe_stride = 1 if a.backbone == "synthetic" else 10
+    if a.descriptor is None:
+        a.descriptor = "rgb" if simulated else "dino"
+    if a.desc_thresh is None and a.descriptor == "dino":
+        a.desc_thresh = 0.5
+    paths, gt_full, desc_fn, runner, meta = load_inputs(a)
+    key = keyframe_indices(len(gt_full), a.keyframe_stride, a.max_frames)
+    gt = gt_full[key]
+    sessions = None
+    if a.backbone != "synthetic":
+        npz_ids = np.load(a.gt, allow_pickle=True)
+        if "frame_ids" in npz_ids:
+            fid = np.asarray(npz_ids["frame_ids"])
+            if np.issubdtype(fid.dtype, np.integer) and fid.max() >= 100000:
+                sessions = (fid[key] // 100000).tolist()
+    if sessions is not None and len(set(sessions)) > 1:
+        from smr.stitch.chunks import make_session_chunks
+        chunks = make_session_chunks(sessions, a.chunk, a.overlap)
+        print(f"  {len(set(sessions))} sessions -> chunks never straddle a session boundary; "
+              f"each session start is placed by relocalisation")
+    else:
+        chunks = make_chunks(len(key), a.chunk, a.overlap)
+    if paths is not None:
+        kpaths = [paths[i] for i in key]
+        # pre-flight: every keyframe image must exist BEFORE any model is
+        # loaded (a missing session folder cost a silent nine-backbone loop)
+        missing = [q for q in kpaths if not pathlib.Path(q).exists()]
+        if missing:
+            raise SystemExit(f"{len(missing)} of {len(kpaths)} keyframe images are "
+                             f"missing, first: {missing[0]}  -- re-extract the "
+                             f"sequence or regenerate the gt npz")
+        if runner is None:
+            runner = BackboneRunner(a.backbone, kpaths, device=a.device)
+    if simulated:
+        print("!" * 78)
+        print("!! SIMULATED RUN -- NO MODEL IS EXECUTED AND NO IMAGE IS PERCEIVED.")
+        print("!! Passes are ground-truth poses plus synthetic error. These "
+              "numbers validate\n!! the HARNESS ONLY, are not results, and "
+              "must never appear in a table.")
+        print("!" * 78)
+    if not a.cache and not simulated:
+        # The cache is keyed by keyframe POSITION inside the file, so the file must be unique per trajectory.  7-Scenes
+        # scenes have several sequences that share a scene name: sequences other than seq-01 get their own file
+        # (seq-01 keeps the historical name so existing caches stay valid).  Other datasets have unique scene names.
+        seq = meta.get("sequence", "") or ""
+        tag = "" if (not seq or seq in ("seq-01", "seq-1") or "+" in seq) else "_" + seq.replace("-", "")
+        a.cache = str(ROOT / "outputs" / "cache" /
+                      f"{meta['scene']}{tag}_{a.backbone}_s{a.keyframe_stride}.npy")
+    cache = PassCache(a.cache if not simulated else None)
+    descriptors = desc_fn(key, runner=runner)
+
+    print(f"scene {meta['scene']} ({meta['dataset']}) | {len(key)} keyframes "
+          f"(every {a.keyframe_stride} of {len(gt_full)}) | {len(chunks)} "
+          f"chunks of {a.chunk} (overlap {a.overlap}) | backbone {a.backbone} "
+          f"| sites {a.sites}")
+    steps = [rotation_angle_deg(gt[i, :3, :3].T @ gt[i + 1, :3, :3])
+             for i in range(len(gt) - 1)]
+    print(f"  median rotation between adjacent keyframes: {np.median(steps):.1f}"
+          f" deg (a few degrees is degenerate for these models)")
+    gap = a.revisit_gap or 2 * a.chunk
+    revisits = find_revisit_pairs(gt, min_gap=gap, max_dist=a.revisit_dist,
+                                  max_angle_deg=a.revisit_angle)
+    print(f"  GT revisit pairs (>= {gap} keyframes apart): {len(revisits)}")
+
+    # ------------------------------------------------------------ probe --
+    t0 = time.time()
+    ref = probe.reference_probe(len(key), cache, runner, gt, a.ref_size)
+    rows_probe = probe.chunk_probe(chunks, cache, runner, gt)
+    verdict = probe.gate(rows_probe, ref, ratio=a.gate_ratio, floor=a.gate_floor)
+    probe.print_probe(rows_probe, ref, verdict)
+    ceiling = ceiling_probe(key, paths, gt, a, cache, runner) if a.ceiling else None
+    report = dict(SIMULATED=simulated, index=a.index, descriptor=a.descriptor, known_K=a.known_K,
+                  WARNING=("harness validation only; no model executed"
+                           if simulated else None),
+                  scene=meta["scene"], dataset=meta["dataset"],
+                  backbone=a.backbone, keyframes=len(key),
+                  keyframe_stride=a.keyframe_stride, chunk=a.chunk,
+                  overlap=a.overlap, sites=a.sites, n_chunks=len(chunks),
+                  n_revisit_pairs=len(revisits), reference=ref,
+                  probe=rows_probe, gate=dict(passed=verdict[0], **verdict[1]),
+                  ceiling=ceiling, rows=[],
+                  provenance=provenance.run_record(a, backbone=a.backbone))
+    if a.probe_only:
+        _write(report, a, simulated, meta)
+        return
+
+    # ------------------------------------------------------------- rows --
+    want = [r for r in a.rows.split(",") if r]
+    rpe_dist = a.rpe_dist if meta["metric"] else None
+    rows, results = [], {}
+
+    ests = {}                                  # v123: per-row trajectories for --save-est
+
+    def add_row(name, est, passes, extra):
+        ests[name] = np.asarray(est, float)
+        # AUC split by CHUNK WINDOW for every row (identical pair sets, so
+        # AUCin is the pass-through monitor); the split by pass is kept in
+        # the JSON as auc_within_pass / auc_cross_pass.
+        cols = summarise_long(est, gt, [list(c) for c in chunks], revisits,
+                              chunk_len=a.chunk, rpe_dist=rpe_dist)
+        from smr.eval.trajectory import auc_split
+        bp = auc_split(est, gt, passes)
+        cols.update(auc_within_pass=bp["auc_within"], auc_cross_pass=bp["auc_cross"])
+        secs, peak = cache.totals(passes)
+        cols.update(method=name, backbone=a.backbone, n_passes=len(passes),
+                    frames_per_pass=float(np.mean([len(p) for p in passes])),
+                    backbone_secs=round(secs, 2), peak_mem_gb=round(peak, 2),
+                    sec_per_frame=round(secs / max(1, len(key)), 3), **extra)
+        rows.append(cols)
+        return cols
+
+    if ceiling and ceiling.get("n") == len(key):
+        sub = list(range(len(key)))
+        add_row("ceiling", cache.get(sub, runner)["poses"], [sub],
+                dict(n_loops=0, n_edges=0, n_rejected=0))
+    if "chained" in want:
+        est = stitch_chained(chunks, cache, runner)
+        add_row("chained", est, [list(c) for c in chunks],
+                dict(n_loops=0, n_edges=len(chunks) - 1, n_rejected=0))
+    dim = descriptors.shape[1]
+    sa = [float(x) for x in a.site_agree.split(",")]
+    common = dict(n_sites=a.sites, remeasure=a.remeasure, verbose=a.verbose,
+                  desc_thresh=a.desc_thresh, mutual_nn=a.mutual_nn,
+                  site_agree_rot=sa[0], site_agree_pos=sa[1],
+                  site_rot_deg=a.site_rot, site_dir_deg=a.site_dir, extent_factor=a.extent_factor,
+                  budget_rot=tuple(float(x) for x in a.budget_rot.split(",")),
+                  budget_pos=tuple(float(x) for x in a.budget_pos.split(",")),
+                  budget_logscale=a.budget_logscale,
+                  tight_rot=tuple(float(x) for x in a.tight_rot.split(",")),
+                  tight_pos=tuple(float(x) for x in a.tight_pos.split(",")),
+                  smooth_junctions=not a.no_smooth_junctions, top_proposals=a.top_proposals)
+
+    def scaffold():
+        if a.index == "flat":
+            from smr.stitch.memory_index import DescriptorIndex
+            return DescriptorIndex()
+        if a.index == "dynamics":
+            from smr.dynamics import ScaffoldState
+            from smr.stitch.memory_index import PERIODS
+            ss = ScaffoldState(periods=list(PERIODS), ring_N=128, torus_N=a.torus_N, seed=a.seed, omega_max=0.16)
+            ss.calibrate()
+            return ScaffoldIndex(N_h=a.N_h, torus_N=a.torus_N, seed=a.seed, desc_dim=dim,
+                                 encode="dynamics", scaffold_state=ss)
+        return ScaffoldIndex(N_h=a.N_h, torus_N=a.torus_N, seed=a.seed,
+                             desc_dim=dim)
+
+    def loops_of(r):
+        return dict(n_loops=r["n_loops"], n_rejected=r["n_rejected"],
+                    n_edges=len(r["edges"]))
+
+    if any(r in want for r in ("smr", "smr_pgo")):
+        st = AnchoredStitcher(scaffold(), correction=a.correction, **common)
+        t1 = time.time()
+        r = st.run(chunks, cache, runner, descriptors)
+        results["smr"] = r
+        if "smr" in want:
+            add_row("smr", r["est"], r["passes"], dict(
+                stitch_secs=round(time.time() - t1 - cache.totals(r["passes"])[0], 2),
+                **loops_of(r)))
+        if "smr_pgo" in want:
+            t2 = time.time()
+            pg, info = posegraph.solve(r, chunks, robust_reject=not a.no_robust_batch)
+            pgo_solve_secs = round(time.time() - t2, 3)       # the optimizer alone (pgo_secs below may include optional extra rows)
+            if "smr_pgo_wide" in want:
+                # re-measure every accepted loop edge with ONE wide joint pass
+                # (8+8 spatially closest frames of the two chunks, chosen from
+                # the current batch estimate) -- the loop-centric measurement,
+                # pose-level only, cached like every other pass
+                t5 = time.time()
+                from smr.stitch import sim3 as _s3
+                pg0, _ = posegraph.solve(r, chunks, robust_reject=not a.no_robust_batch)
+                wp = {g: pg0[g][:3, 3] for g in range(len(pg0))}
+                r_w = dict(r); r_w["edges"] = [dict(e) for e in r["edges"]]
+                n_rem = 0
+                own = r["owner"]
+                for e in r_w["edges"]:
+                    if e["kind"] != "loop":
+                        continue
+                    c1, c2 = int(e["c"]), int(e["k"])
+                    # only frames OWNED by the chunk: local[g] is the pose in
+                    # the owner's pass gauge, and the fit target must match it
+                    oc1 = [g for g in chunks[c1] if own[g] == c1]
+                    oc2 = [g for g in chunks[c2] if own[g] == c2]
+                    if len(oc1) < 4 or len(oc2) < 4:
+                        continue
+                    fc = sorted(oc1, key=lambda g: min(
+                        np.linalg.norm(wp[g] - wp[h]) for h in oc2))[:8]
+                    fk = sorted(oc2, key=lambda g: min(
+                        np.linalg.norm(wp[g] - wp[h]) for h in fc))[:8]
+                    P = cache.get([int(g) for g in fc + fk], runner)["poses"]
+                    Sc, kc, ic = _s3.fit_poses_robust(P[:len(fc)], np.stack([r["local"][g] for g in fc]), min_inliers=4)
+                    Sk, kk, ik = _s3.fit_poses_robust(P[len(fc):], np.stack([r["local"][g] for g in fk]), min_inliers=4)
+                    if not (ic.get("scale_ok", True) and ik.get("scale_ok", True)):
+                        continue
+                    e["Z"] = _s3.compose(Sc, _s3.inverse(Sk))
+                    e["w_scale"] = 1.0
+                    n_rem += 1
+                pgw, infow = posegraph.solve(r_w, chunks, robust_reject=not a.no_robust_batch)
+                add_row("smr_pgo_wide", pgw, r["passes"],
+                        dict(pgo_secs=round(time.time() - t5, 2), pgo_cost=infow["cost"],
+                             n_wide_loops=n_rem, n_dropped_edges=infow.get("n_dropped", 0),
+                             **loops_of(r)))
+            if "smr_pgo_lba" in want:
+                t4 = time.time()
+                from smr.stitch import sim3 as _s3
+                extra = []
+                key_of = {tuple(ch): ci for ci, ch in enumerate(chunks)}
+                for c1 in range(len(chunks)):
+                    for c2 in range(c1 + 2, min(c1 + 5, len(chunks))):
+                        shared = [g for g in chunks[c2] if g in set(chunks[c1])]
+                        if len(shared) < 6:
+                            continue
+                        P1 = cache.data.get(cache.key(chunks[c1]))
+                        P2 = cache.data.get(cache.key(chunks[c2]))
+                        if P1 is None or P2 is None:
+                            continue
+                        A = np.stack([P2["poses"][chunks[c2].index(g)] for g in shared])
+                        B = np.stack([P1["poses"][chunks[c1].index(g)] for g in shared])
+                        S_sk, keep_sk, info_sk = _s3.fit_poses_robust(A, B, min_inliers=4)
+                        extra.append(dict(c=c1, k=c2, Z=S_sk, w_scale=0.0, kind="seq"))
+                if extra:
+                    r_lba = dict(r); r_lba["edges"] = list(r["edges"]) + extra
+                    pgl, infol = posegraph.solve(r_lba, chunks, robust_reject=not a.no_robust_batch)
+                    add_row("smr_pgo_lba", pgl, r["passes"],
+                            dict(pgo_secs=round(time.time() - t4, 2), pgo_cost=infol["cost"],
+                                 n_skip_edges=len(extra), n_dropped_edges=infol.get("n_dropped", 0),
+                                 **loops_of(r)))
+                else:
+                    print("    [smr_pgo_lba] no skip overlaps at this chunk/overlap; row skipped")
+            if "smr_pgo_dense" in want and a.backbone != "synthetic":
+                from smr.backbones import get_backbone
+                from smr.stitch import dense_edges
+                t3 = time.time()
+                bb_d = get_backbone(a.backbone, device=a.device)
+                kf_paths = [paths[i] for i in key]
+                infer_dense = lambda ps: bb_d.infer(ps)
+                if a.known_K is not None:                 # calibrated variant: replace predicted intrinsics by the known ones
+                    fx, fy, cx, cy = a.known_K; W0, H0 = a.known_K_res; shown = [False]
+
+                    def infer_dense(ps, _inf=bb_d.infer):
+                        o = _inf(ps); H, W = o.depth.shape[1:3]; sx, sy = W / W0, H / H0
+                        Kk = np.array([[fx * sx, 0, cx * sx], [0, fy * sy, cy * sy], [0, 0, 1.0]])
+                        if not shown[0]:
+                            Kp = o.intrinsics if o.intrinsics.ndim == 2 else o.intrinsics[0]
+                            print(f"    [calibrated] depth {W}x{H}; predicted K f=({Kp[0,0]:.1f},{Kp[1,1]:.1f}) c=({Kp[0,2]:.1f},{Kp[1,2]:.1f})"
+                                  f" -> known f=({Kk[0,0]:.1f},{Kk[1,1]:.1f}) c=({Kk[0,2]:.1f},{Kk[1,2]:.1f})"); shown[0] = True
+                        o.intrinsics = np.repeat(Kk[None], o.depth.shape[0], 0) if o.intrinsics.ndim == 3 else Kk
+                        return o
+                rd = dense_edges.remeasure(r, chunks, kf_paths, infer_dense, verbose=True)
+                pgd, infod = posegraph.solve(rd, chunks, robust_reject=not a.no_robust_batch)
+                add_row("smr_pgo_dense", pgd, r["passes"],
+                        dict(pgo_secs=round(time.time() - t3, 2), pgo_cost=infod["cost"],
+                             n_dropped_edges=infod.get("n_dropped", 0), **loops_of(r)))
+            add_row("smr_pgo", pg, r["passes"],
+                    dict(pgo_secs=round(time.time() - t2, 2), pgo_solve_secs=pgo_solve_secs, pgo_cost=info["cost"],
+                         n_dropped_edges=info.get("n_dropped", 0), **loops_of(r)))
+    if "classical" in want:
+        st = AnchoredStitcher(DescriptorIndex(), correction="none", **common)
+        r = st.run(chunks, cache, runner, descriptors)
+        results["classical"] = r
+        t2 = time.time()
+        pg, info = posegraph.solve(r, chunks)
+        add_row("classical", pg, r["passes"],
+                dict(pgo_secs=round(time.time() - t2, 2), pgo_cost=info["cost"],
+                     **loops_of(r)))
+    if "smr_jump" in want:
+        r = AnchoredStitcher(scaffold(), correction="jump", **common).run(
+            chunks, cache, runner, descriptors)
+        results["smr_jump"] = r
+        add_row("smr_jump", r["est"], r["passes"], loops_of(r))
+    if "plain" in want:
+        r = AnchoredStitcher(DescriptorIndex(), correction=a.correction,
+                             **common).run(chunks, cache, runner, descriptors)
+        results["plain"] = r
+        add_row("plain", r["est"], r["passes"], loops_of(r))
+
+    # ------------------------------------------------------------ table --
+    unit = "m" if meta["metric"] else "u"
+    hdr = (f"{'method':<10}{'ATE(' + unit + ')':>9}{'RPE-t1':>8}{'RPE-r1':>8}"
+           f"{'RPEtC':>8}{'RPErC':>8}{'AUCall':>8}{'AUCin':>7}{'AUCx':>7}"
+           f"{'loopR':>7}{'loopT':>8}{'scl':>6}{'loops':>6}{'rej':>5}{'f/pass':>7}"
+           f"{'s/frm':>7}")
+    print("\n" + "=" * len(hdr)); print(hdr); print("-" * len(hdr))
+    for r in rows:
+        print(f"{r['method']:<10}{r['ate_rmse']:>9.4f}{r['rpe_trans']:>8.4f}"
+              f"{r['rpe_rot_deg']:>8.3f}{r['rpe_trans_chunk']:>8.4f}"
+              f"{r['rpe_rot_chunk_deg']:>8.2f}{r['auc_all']:>8.1f}"
+              f"{r['auc_within']:>7.1f}{r['auc_cross']:>7.1f}"
+              f"{r['loop_rot_deg']:>7.2f}{r['loop_trans']:>8.4f}"
+              f"{r['scale_drift_max']:>6.2f}{r['n_loops']:>6d}{r['n_rejected']:>5d}"
+              f"{r['frames_per_pass']:>7.1f}{r['sec_per_frame']:>7.3f}")
+    print("=" * len(hdr))
+    print("  RPE-t1/r1: adjacent keyframes (backbone-dominated). RPEtC/rC: "
+          "over one chunk length.\n  AUCin: pairs inside one chunk window "
+          "(pass-through; must stay close across rows).\n  AUCx: pairs "
+          "from different chunks (the stitcher). loopR/loopT: "
+          "relative-pose error across GT revisit pairs.\n  scl: max |log| "
+          "local/global scale ratio. loops/rej: closures accepted / rejected "
+          "by the consistency gate.")
+    base = [r for r in rows if r["method"] == "chained"]
+    if base and len(rows) >= 2:
+        b = base[0]
+        for r in rows:
+            if r["method"] == "chained":
+                continue
+            print(f"  {r['method']:<10} vs chained: ATE x{b['ate_rmse'] / max(r['ate_rmse'], 1e-12):.2f}"
+                  f"  loop-rot x{b['loop_rot_deg'] / max(r['loop_rot_deg'], 1e-9):.2f}"
+                  f"  AUC-cross {b['auc_cross']:.1f} -> {r['auc_cross']:.1f}")
+    if not verdict[0]:
+        print("\n  REMINDER: the per-chunk gate FAILED above; these rows are not "
+              "a measurement of any stitcher.")
+    report["rows"] = rows
+    report["events"] = {k: v["events"] for k, v in results.items()}
+    report["elapsed_secs"] = round(time.time() - t0, 1)
+    _write(report, a, simulated, meta)
+    if a.save_est:
+        # v123: the rows' trajectories (row global frame, one c2w per keyframe),
+        # the keyframe indices into the GT npz, the chunk windows and the image
+        # paths -- everything experiments/points_suite.py --pilot needs to
+        # place the SAME backbone passes under each row's junctions.
+        out = pathlib.Path(a.save_est)
+        if not out.is_absolute():
+            out = ROOT / out
+        out.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(out, gt=str(a.gt), backbone=a.backbone, key=np.asarray(key, int),
+                            chunks=np.array([np.asarray(c, int) for c in chunks], dtype=object),
+                            kpaths=np.array(kpaths if paths is not None else [], dtype=object),
+                            rows=np.array(list(ests.keys()), dtype=object),
+                            **{f"est_{k}": v for k, v in ests.items()})
+        print(f"row trajectories -> {out}  rows={list(ests.keys())}")
+
+
+def _write(report, a, simulated, meta):
+    out = a.json or f"outputs/reports/pilotA_{meta['scene']}_{a.backbone}_s{a.keyframe_stride}_c{a.chunk}.json"
+    out = ROOT / out
+    if simulated:
+        out = out.with_name(out.stem + "_SIMULATED" + out.suffix)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=2, default=_json_default))
+    print(f"report -> {out}")
+    if simulated:
+        print("reminder: SIMULATED. Nothing above is a result.")
+
+
+def _json_default(o):
+    if isinstance(o, (np.floating, np.integer)):
+        return o.item()
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    if isinstance(o, tuple):
+        return list(o)
+    return str(o)
+
+
+if __name__ == "__main__":
+    main()

@@ -181,6 +181,11 @@ def main():
     ap.add_argument("--remeasure", action="store_true",
                     help="verify each site with a 4-frame second pass "
                          "(ablation; off by default, see notes)")
+    ap.add_argument("--known-K", nargs=4, type=float, default=None, metavar=("FX", "FY", "CX", "CY"),
+                    help="CALIBRATED dense-edge re-measurement: use these intrinsics (given at --known-K-res) instead of the backbone's "
+                         "predicted ones when unprojecting depth for the smr_pgo_dense row. 7-Scenes: 585 585 320 240 at 640 480. "
+                         "Has NO effect on the pose-based rows (chained / smr / smr_pgo), which never use intrinsics.")
+    ap.add_argument("--known-K-res", nargs=2, type=float, default=[640, 480], metavar=("W", "H"))
     ap.add_argument("--index", default="template", choices=["flat", "template", "dynamics"],
                     help="memory index: flat = cosine over cues (no scaffold; the key-value baseline); template = scaffold with "
                          "analytic grid-code addresses (default, what the tables use); dynamics = addresses read from the settled "
@@ -295,7 +300,7 @@ def main():
     verdict = probe.gate(rows_probe, ref, ratio=a.gate_ratio, floor=a.gate_floor)
     probe.print_probe(rows_probe, ref, verdict)
     ceiling = ceiling_probe(key, paths, gt, a, cache, runner) if a.ceiling else None
-    report = dict(SIMULATED=simulated, index=a.index, descriptor=a.descriptor,
+    report = dict(SIMULATED=simulated, index=a.index, descriptor=a.descriptor, known_K=a.known_K,
                   WARNING=("harness validation only; no model executed"
                            if simulated else None),
                   scene=meta["scene"], dataset=meta["dataset"],
@@ -378,6 +383,7 @@ def main():
         if "smr_pgo" in want:
             t2 = time.time()
             pg, info = posegraph.solve(r, chunks, robust_reject=not a.no_robust_batch)
+            pgo_solve_secs = round(time.time() - t2, 3)       # the optimizer alone (pgo_secs below may include optional extra rows)
             if "smr_pgo_wide" in want:
                 # re-measure every accepted loop edge with ONE wide joint pass
                 # (8+8 spatially closest frames of the two chunks, chosen from
@@ -450,14 +456,26 @@ def main():
                 t3 = time.time()
                 bb_d = get_backbone(a.backbone, device=a.device)
                 kf_paths = [paths[i] for i in key]
-                rd = dense_edges.remeasure(r, chunks, kf_paths,
-                                           lambda ps: bb_d.infer(ps), verbose=True)
+                infer_dense = lambda ps: bb_d.infer(ps)
+                if a.known_K is not None:                 # calibrated variant: replace predicted intrinsics by the known ones
+                    fx, fy, cx, cy = a.known_K; W0, H0 = a.known_K_res; shown = [False]
+
+                    def infer_dense(ps, _inf=bb_d.infer):
+                        o = _inf(ps); H, W = o.depth.shape[1:3]; sx, sy = W / W0, H / H0
+                        Kk = np.array([[fx * sx, 0, cx * sx], [0, fy * sy, cy * sy], [0, 0, 1.0]])
+                        if not shown[0]:
+                            Kp = o.intrinsics if o.intrinsics.ndim == 2 else o.intrinsics[0]
+                            print(f"    [calibrated] depth {W}x{H}; predicted K f=({Kp[0,0]:.1f},{Kp[1,1]:.1f}) c=({Kp[0,2]:.1f},{Kp[1,2]:.1f})"
+                                  f" -> known f=({Kk[0,0]:.1f},{Kk[1,1]:.1f}) c=({Kk[0,2]:.1f},{Kk[1,2]:.1f})"); shown[0] = True
+                        o.intrinsics = np.repeat(Kk[None], o.depth.shape[0], 0) if o.intrinsics.ndim == 3 else Kk
+                        return o
+                rd = dense_edges.remeasure(r, chunks, kf_paths, infer_dense, verbose=True)
                 pgd, infod = posegraph.solve(rd, chunks, robust_reject=not a.no_robust_batch)
                 add_row("smr_pgo_dense", pgd, r["passes"],
                         dict(pgo_secs=round(time.time() - t3, 2), pgo_cost=infod["cost"],
                              n_dropped_edges=infod.get("n_dropped", 0), **loops_of(r)))
             add_row("smr_pgo", pg, r["passes"],
-                    dict(pgo_secs=round(time.time() - t2, 2), pgo_cost=info["cost"],
+                    dict(pgo_secs=round(time.time() - t2, 2), pgo_solve_secs=pgo_solve_secs, pgo_cost=info["cost"],
                          n_dropped_edges=info.get("n_dropped", 0), **loops_of(r)))
     if "classical" in want:
         st = AnchoredStitcher(DescriptorIndex(), correction="none", **common)

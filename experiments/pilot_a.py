@@ -44,6 +44,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from smr.eval.trajectory import (ate_rmse, auc_at, find_revisit_pairs,    # noqa: E402
                                  pairwise_pose_errors, rotation_angle_deg,
                                  summarise_long)
+from smr.utils import provenance  # noqa: E402  (v177)
 from smr.stitch import (AnchoredStitcher, BackboneRunner, DescriptorIndex,  # noqa: E402
                         PassCache, ScaffoldIndex, image_descriptors,
                         keyframe_indices, make_chunks, posegraph, probe,
@@ -101,6 +102,9 @@ def load_inputs(a):
             if bb is None:
                 raise SystemExit("--descriptor feat needs the backbone runner (real backbone), built before descriptors")
             desc = feat_descriptors(sel, bb, device=a.device)
+        elif a.descriptor not in ("rgb", "dino", "feat"):
+            from smr.stitch.vpr_descriptors import vpr_descriptors   # v182: eigenplaces, cosplace, salad, boq, netvlad, mixvpr, a+b, kind@N
+            desc = vpr_descriptors(sel, a.descriptor, device=a.device)
         else:
             desc = image_descriptors(sel)
         if cache is not None:
@@ -176,6 +180,21 @@ def main():
     ap.add_argument("--site-agree", default="1e9,1e9",
                     help="v75 rule (A/B: mixed): max rot(deg),pos(spreads) disagreement "
                          "between two sites before the closure is demoted; default off")
+    # -- v177: operative verification constants as flags (defaults = every existing run)
+    ap.add_argument("--site-rot", type=float, default=10.0, help="per-site gate: max rotation residual of the site's internal pose (deg)")
+    ap.add_argument("--site-dir", type=float, default=25.0, help="per-site gate: max translation-direction residual (deg)")
+    ap.add_argument("--extent-factor", type=float, default=3.0, help="per-site gate: max distance from the window centroid (spreads)")
+    ap.add_argument("--budget-rot", default="10,3,45", help="two-site drift budget: r0,r1,rmax -> min(rmax, r0 + r1*n_stretch) deg")
+    ap.add_argument("--budget-pos", default="1.0,0.5", help="two-site drift budget: p0,p1 -> p0 + p1*n_stretch spreads")
+    ap.add_argument("--budget-logscale", type=float, default=0.5)
+    ap.add_argument("--tight-rot", default="3,1,15", help="single-site budget (a lone site may only nudge)")
+    ap.add_argument("--tight-pos", default="0.5,0.15")
+    ap.add_argument("--no-smooth-junctions", action="store_true", help="no per-frame blend of the previous window's overlap at a closure")
+    ap.add_argument("--distortion-gate", type=float, default=1.0,
+                    help="local-from gated: keep the anchored-pass window geometry only if it moved the window's own frames by less than this (deg)")
+    ap.add_argument("--local-from", default="anchored", choices=["anchored", "plain", "gated"],
+                    help="window geometry from the enlarged anchored pass (default, all runs so far) or from the window's own pass (v181)")
+    ap.add_argument("--top-proposals", type=int, default=5)
     ap.add_argument("--no-robust-batch", action="store_true",
                     help="ablation: batch solve without outlier-edge rejection")
     ap.add_argument("--remeasure", action="store_true",
@@ -190,8 +209,8 @@ def main():
                     help="memory index: flat = cosine over cues (no scaffold; the key-value baseline); template = scaffold with "
                          "analytic grid-code addresses (default, what the tables use); dynamics = addresses read from the settled "
                          "attractor bumps (identical up to the decode floor, ~100x slower)")
-    ap.add_argument("--descriptor", default=None, choices=["rgb", "dino", "feat"],
-                    help="place descriptor: DINOv2 ViT-S/14 CLS (default for "
+    ap.add_argument("--descriptor", default=None,
+                    help="place descriptor: rgb | dino | feat | eigenplaces | cosplace | salad | boq | netvlad | mixvpr | a+b | kind@N; DINOv2 ViT-S/14 CLS (default for "
                          "real backbones; pooled RGB found 1 closure in 34 "
                          "chunks where DINO found 10) or pooled RGB (no "
                          "model; default for the synthetic world)")
@@ -226,6 +245,8 @@ def main():
     ap.add_argument("--chunk-distortion", type=float, default=0.1)
     ap.add_argument("--sim-frames", type=int, default=40, help="frames per lap")
     a = ap.parse_args()
+    AnchoredStitcher.local_from = a.local_from
+    AnchoredStitcher.distortion_gate = a.distortion_gate   # v192   # v181 (class attribute; every stitcher instance reads it)
 
     simulated = a.simulate_chunks or a.backbone == "synthetic"
     if a.keyframe_stride is None:
@@ -309,7 +330,8 @@ def main():
                   overlap=a.overlap, sites=a.sites, n_chunks=len(chunks),
                   n_revisit_pairs=len(revisits), reference=ref,
                   probe=rows_probe, gate=dict(passed=verdict[0], **verdict[1]),
-                  ceiling=ceiling, rows=[])
+                  ceiling=ceiling, rows=[],
+                  provenance=provenance.run_record(a, backbone=a.backbone))
     if a.probe_only:
         _write(report, a, simulated, meta)
         return
@@ -351,7 +373,14 @@ def main():
     sa = [float(x) for x in a.site_agree.split(",")]
     common = dict(n_sites=a.sites, remeasure=a.remeasure, verbose=a.verbose,
                   desc_thresh=a.desc_thresh, mutual_nn=a.mutual_nn,
-                  site_agree_rot=sa[0], site_agree_pos=sa[1])
+                  site_agree_rot=sa[0], site_agree_pos=sa[1],
+                  site_rot_deg=a.site_rot, site_dir_deg=a.site_dir, extent_factor=a.extent_factor,
+                  budget_rot=tuple(float(x) for x in a.budget_rot.split(",")),
+                  budget_pos=tuple(float(x) for x in a.budget_pos.split(",")),
+                  budget_logscale=a.budget_logscale,
+                  tight_rot=tuple(float(x) for x in a.tight_rot.split(",")),
+                  tight_pos=tuple(float(x) for x in a.tight_pos.split(",")),
+                  smooth_junctions=not a.no_smooth_junctions, top_proposals=a.top_proposals)
 
     def scaffold():
         if a.index == "flat":

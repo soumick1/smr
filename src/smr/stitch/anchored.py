@@ -68,6 +68,7 @@ def _spread(centres):
 
 class AnchoredStitcher:
     local_from = "anchored"   # v181 class attribute: pilot_a sets AnchoredStitcher.local_from; tests set it per instance
+    distortion_gate = 1.0       # v192: degrees; used by local_from="gated"
 
     def __init__(self, index=None, n_sites=2, recent_window=None,
                  top_proposals=5, desc_thresh=None, partner_gap=3,
@@ -320,15 +321,21 @@ class AnchoredStitcher:
             passes.append(pass_idx)
             pos = {gi: li for li, gi in enumerate(pass_idx)}
             anchored_distortion = None
-            if getattr(self, "local_from", "anchored") == "plain" and anchors:
-                # v181: the window's own pass (cached from the raw chain) supplies its geometry; the enlarged pass is
-                # only a measurement of the revisit, carried into the plain pass's coordinates through the one
-                # similarity that maps the window frames of the anchored pass onto the plain pass
+            if anchors:
+                # v181/v192: the window's own pass (cached from the raw chain) is the reference geometry; the enlarged
+                # pass is a measurement of the revisit.  The Sim(3) residual between the window's frames in the two
+                # passes is the distortion the anchors caused.  plain: always keep the own pass; gated: keep it only
+                # when the distortion exceeds the gate; anchored: never (log only).
+                _mode = getattr(self, "local_from", "anchored")
                 _cp = [pos[g] for g in idx]
                 P0 = cache.get(list(idx), runner)["poses"]
                 T_ap, _, info_ap = self._fit(P[_cp], P0)
-                anchored_distortion = dict(rot_deg=float(info_ap["rot_res_deg"].max()),
-                                           pos_rel=float(info_ap["pos_res"].max() / max(float(info_ap["spread"]), 1e-9)))
+                _rot = float(info_ap["rot_res_deg"].max())
+                _replace = (_mode == "plain") or (_mode == "gated" and _rot > float(getattr(self, "distortion_gate", 1.0)))
+                anchored_distortion = dict(rot_deg=_rot,
+                                           pos_rel=float(info_ap["pos_res"].max() / max(float(info_ap["spread"]), 1e-9)),
+                                           used=("plain" if _replace else "anchored"))
+            if anchors and _replace:
                 P = P.copy()
                 P[_cp] = P0
                 for g in anchors:
