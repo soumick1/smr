@@ -391,16 +391,19 @@ def test_gate_constants_are_the_paper_values():
 
 
 def test_pilot_a_defaults_documented():
-    """Operative pilot_a defaults for every stitching table: scaffold index
-    size, torus size and the DINO cosine gate."""
+    """Operative pilot_a configuration (v198): the --paper preset is the default and matches the manuscript
+    (N_h 1024, k 64, torus 48, 256-unit orientation rings, median-depth scene unit, agreement test 3 deg / 0.15 E,
+    Sim(3) interpolation, IRLS alignment with gamma_s 1.5); --legacy restores the pre-v198 configuration."""
     src = (ROOT / "experiments" / "pilot_a.py").read_text()
-    nh = int(re.search(r'"--N-h",\s*type=int,\s*default=(\d+)', src).group(1))
-    tn = int(re.search(r'"--torus-N",\s*type=int,\s*default=(\d+)', src).group(1))
-    assert (nh, tn) == (2048, 32), (nh, tn)
-    assert re.search(r'a\.descriptor == "dino":\s*\n\s*a\.desc_thresh = 0\.5', src), "DINO gate is not the absolute 0.5"
-    idx = ScaffoldIndex(N_h=nh, torus_N=tn, seed=0, desc_dim=384)
-    assert idx.block.N_g == 3 * (tn * tn + tn) == 3168          # position-only code
-    assert idx.block.k == nh // 16 == 128
+    paper = re.search(r"P = dict\((.*?)\)\n", src, re.S).group(1)
+    legacy = re.search(r"L = dict\((.*?)\)\n", src, re.S).group(1)
+    for key in ("N_h=1024", "torus_N=48", "k=64", "ring_N=256", 'scene_unit="auto"', 'correction="distribute"', 'site_agree="3,0.15"',
+                "seq_scale_gate=1.5", 'fit_mode="irls"', "require_two_sites=True", "reject_on_disagree=True", "pair_strict=True"):
+        assert key in paper, key
+    for key in ("N_h=2048", "torus_N=32", "ring_N=0", 'correction="relax"', 'site_agree="1e9,1e9"'):
+        assert key in legacy, key
+    gate = re.search(r'desc_thresh is None and a\.descriptor == "dino":\s*\n\s*a\.desc_thresh = ([\d.]+)', src)
+    assert gate and float(gate.group(1)) == 0.5
 
 
 # ================================================ G. local_from="plain" (v181)
@@ -455,3 +458,49 @@ def test_local_from_plain_still_closes_loops(capsys):
     with capsys.disabled():
         print(f"\n[G] synthetic ATE: chain {ate_raw:.3f}, plain-local +SMR {ate_plain:.3f} ({r['n_loops']} loops), "
               f"anchored-local +SMR {ate_anch:.3f} ({r2['n_loops']} loops)")
+
+
+# ================================================ H. paper acceptance rules (v198)
+def test_paper_rules_two_pairs_and_disagreement(capsys):
+    """require_two_sites: a window with one verified pair closes nothing; reject_on_disagree: when the two pairs'
+    placements differ by more than the agreement tolerance, both are marked `disagree` and nothing is written back
+    (no single-pair demotion); pair_strict: partners are exactly +-partner_gap."""
+    w, runner = _world()
+    chunks = make_chunks(len(w.gt), 16, 8)
+    cache = PassCache(None)
+    kw = dict(_common()); kw.update(pair_strict=True, require_two_sites=True, reject_on_disagree=True,
+                                  site_agree_rot=3.0, site_agree_pos=0.15, correction="distribute")
+    r = AnchoredStitcher(DescriptorIndex(), **kw).run(chunks, cache, runner, w.descriptors)
+    one_pair_windows = [e for e in r["events"] if sum(1 for s in (e.get("sites") or []) if s.get("ok")) == 1]
+    assert all(not (e.get("loop") or {}).get("accepted") for e in one_pair_windows), "a single valid pair must not close a loop"
+    disagreed = [s for e in r["events"] for s in (e.get("sites") or []) if s.get("disagree")]
+    assert all(s.get("disagree", {}).get("rejected") for s in disagreed), "disagreement must reject, not demote"
+    for e in r["events"]:
+        for s in (e.get("sites") or []):
+            assert abs(int(s["partner"]) - int(s["view"])) == kw.get("partner_gap", 3)
+    accepted = [e for e in r["events"] if (e.get("loop") or {}).get("accepted")]
+    with capsys.disabled():
+        print(f"\n[H] paper rules on the synthetic world: {len(accepted)} closures accepted, {len(disagreed)} pairs rejected by the "
+              f"agreement test, {len(one_pair_windows)} single-pair windows left unchanged")
+
+
+def test_irls_fit_matches_exact_on_clean_data():
+    """App. A reweighted fit recovers an exact similarity on clean correspondences and tolerates one outlier."""
+    from smr.stitch import sim3
+    rng = np.random.default_rng(0)
+    def rot(v):
+        v = np.asarray(v, float); th = np.linalg.norm(v)
+        if th < 1e-12:
+            return np.eye(3)
+        k = v / th; K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+        return np.eye(3) + np.sin(th) * K + (1 - np.cos(th)) * K @ K
+    A = np.tile(np.eye(4), (8, 1, 1)); A[:, :3, 3] = rng.normal(0, 1, (8, 3))
+    for i in range(8):
+        A[i, :3, :3] = rot(rng.normal(0, 0.8, 3))
+    S = (1.7, rot([0.4, -0.2, 0.9]), np.array([0.3, -1.0, 2.0]))
+    B = sim3.apply(S, A)
+    B[3, :3, 3] += np.array([2.0, -3.0, 1.0])              # one outlier centre
+    S_hat, keep, info = sim3.fit_poses_irls(A, B, rounds=5, kappa=2.5, rot_thresh_deg=10.0)
+    err = np.linalg.norm(sim3.apply(S_hat, A)[[0, 1, 2, 4, 5, 6, 7], :3, 3] - B[[0, 1, 2, 4, 5, 6, 7], :3, 3], axis=1).max()
+    assert err < 0.1, err
+    assert info["weights"][3] < 0.5, "the outlier must be down-weighted"

@@ -16,7 +16,7 @@ Frozen backbone -> world-frame point maps on the render grid:
 """
 from __future__ import annotations
 
-import itertools, json, pathlib, sys
+import json, pathlib, sys
 
 import numpy as np
 
@@ -99,37 +99,18 @@ def place_views(o, gt_c2w, K, res, source="auto"):
     return np.stack(pts), np.stack(conf), float(s)
 
 
-def predict_geometry(bb, paths, gt_c2w, K, res, reads=1, source="auto", tau_abs=0.01, fallback="median", seed=0, abstain_rel=0.0, align=True):
-    """Raw (reads=1) or read (reads>1) geometry for `paths` (the input views, GT cameras known).
-    Returns dict(pts (V,res,res,3), conf (V,res,res), scales [per read], orderings)."""
+def predict_geometry(bb, paths, gt_c2w, K, res, reads=1, source="auto", tau_abs=None, fallback=None, seed=0, abstain_rel=None, align=None):
+    """Geometry of the input views from ONE backbone pass, placed into the GT camera frame (v198: the repeated-read
+    consensus over input orderings was removed from the method; `reads` > 1 is rejected so old call sites fail loudly).
+    Returns dict(pts (V,res,res,3), conf (V,res,res), scales [s], orderings [identity])."""
+    if int(reads) != 1:
+        raise ValueError("repeated reads (reads > 1) were removed in v198; the memory supplies geometry through stored "
+                         "windows and their revised placements, not by re-reading the same views in other orders")
     V = len(paths)
-    perms = [tuple(range(V))]
-    if reads > 1:
-        rng = np.random.default_rng(seed)
-        others = [p for p in itertools.permutations(range(V)) if p != perms[0]]
-        rng.shuffle(others)
-        perms += others[: reads - 1]
-    per_read_pts, per_read_conf, scales = [], [], []
-    for perm in perms:
-        inv = np.argsort(perm)                                       # position of view v in this ordering
-        o = bb.infer([paths[i] for i in perm])
-        gt_perm = np.asarray(gt_c2w)[list(perm)]
-        p, c, s = place_views(o, gt_perm, K, res, source)
-        per_read_pts.append(p[inv]); per_read_conf.append(c[inv]); scales.append(s)   # back to view order
-    if reads == 1:
-        return dict(pts=per_read_pts[0], conf=per_read_conf[0], scales=scales, orderings=perms)
-    from points_suite import consensus_fuse, content_align          # the memory's read (same code as DTU/ETH3D)
-    ctx_pts = [{v: p[v].reshape(-1, 3) for v in range(V)} for p in per_read_pts]
-    ctx_cams = [{v: np.asarray(gt_c2w[v])[:3, 3] for v in range(V)} for _ in per_read_pts]
-    if align:                                                     # symmetric re-measure (ablation: --no-align skips it)
-        ctx_pts = content_align(ctx_pts, ctx_cams, model="scale", ref="mean")
-    # abstain_rel=0: never abstain. On DTU/ETH3D a pixel whose witnesses contradict each other by metres is
-    # dropped (a failing pass must not drag the cloud); for rendering a hole is strictly worse than the median
-    # compromise, and the abstention was emptying whole views (v148 finding: -18 % Gaussians on VGGT-Omega).
-    fused = consensus_fuse(ctx_pts, m=2, tau_abs=tau_abs, keep_singles=True, fallback=fallback, abstain_rel=abstain_rel)
-    pts = np.stack([fused[v].reshape(res, res, 3) for v in range(V)])
-    conf = np.median(np.stack(per_read_conf), 0)
-    return dict(pts=pts, conf=conf, scales=scales, orderings=perms)
+    perm = tuple(range(V))
+    o = bb.infer([paths[i] for i in perm])
+    p, c, s = place_views(o, np.asarray(gt_c2w)[list(perm)], K, res, source)
+    return dict(pts=p, conf=c, scales=[s], orderings=[perm])
 
 
 def head_input(rgb, pts, conf, alpha, depth_from_cams=None):

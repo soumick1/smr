@@ -14,12 +14,14 @@ from ..utils import rng
 
 
 class BlockScaffold:
-    def __init__(self, periods, torus_N=32, N_h=1024, k=64, seed=0):
+    def __init__(self, periods, torus_N=32, N_h=1024, k=64, seed=0, ring_N=0):
         self.periods = np.asarray(periods, dtype=float)
         self.M, self.Nt = len(periods), torus_N
         self.ax = 2 * np.pi * np.arange(torus_N) / torus_N
         self.dim_mod = torus_N * torus_N + torus_N        # torus + z-ring
-        self.N_g = self.M * self.dim_mod
+        self.ring_N = int(ring_N)                         # v198: 3 orientation rings (yaw, pitch, roll) of ring_N units; 0 = position only
+        self.ax_ring = 2 * np.pi * np.arange(self.ring_N) / max(1, self.ring_N)
+        self.N_g = self.M * self.dim_mod + 3 * self.ring_N
         self.N_h, self.k = N_h, k
         self.W_gh = rng(seed).standard_normal((N_h, self.N_g)) / np.sqrt(self.N_g)
         self.W_hg = np.zeros((self.N_g, N_h))
@@ -32,12 +34,20 @@ class BlockScaffold:
         b = np.exp(-0.5 * (d / self.sigma) ** 2)
         return b / (np.linalg.norm(b) + 1e-12)
 
-    def encode_phases(self, phases):                      # (M, 3) -> g
+    def _bump_ring(self, phase):
+        d = np.abs((self.ax_ring - phase + np.pi) % (2 * np.pi) - np.pi)
+        b = np.exp(-0.5 * (d / self.sigma) ** 2)
+        return b / (np.linalg.norm(b) + 1e-12)
+
+    def encode_phases(self, phases, euler=None):          # (M, 3) [+ (3,) yaw/pitch/roll] -> g
         parts = []
         for m in range(self.M):
             bx, by, bz = (self._bump1d(phases[m, i]) for i in range(3))
             parts.append(np.outer(bx, by).ravel())
             parts.append(bz)
+        if self.ring_N:
+            e = np.zeros(3) if euler is None else np.asarray(euler, float)
+            parts += [self._bump_ring(float(a)) for a in e]
         return np.concatenate(parts)
 
     def phases_of_pos(self, x, offsets=None):

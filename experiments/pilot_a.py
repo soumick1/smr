@@ -148,6 +148,22 @@ def ceiling_probe(key, paths, gt, a, cache, runner):
     return dict(n=0)
 
 
+def median_depth_first_window(runner, idx):
+    """Median predicted depth of the first window's pass (scene unit of the manuscript); None if unavailable."""
+    try:
+        bb = getattr(runner, "bb", None)
+        if bb is None:
+            return None
+        out = bb.infer([runner.paths[i] for i in idx])
+        d = getattr(out, "depth", None)
+        if d is None:
+            return None
+        d = np.asarray(d, float); d = d[np.isfinite(d) & (d > 0)]
+        return float(np.median(d)) if d.size else None
+    except Exception as ex:  # noqa: BLE001
+        print(f"scene unit: median depth failed ({str(ex)[:80]})"); return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--gt", default="", help="npz with (K,4,4) c2w 'poses' + image_paths")
@@ -228,8 +244,15 @@ def main():
                     help="min keyframe gap for a revisit (default 2*chunk)")
     ap.add_argument("--rpe-dist", type=float, default=1.0,
                     help="RPE over this GT path length (metric datasets)")
-    ap.add_argument("--N-h", type=int, default=2048)
-    ap.add_argument("--torus-N", type=int, default=32)
+    ap.add_argument("--N-h", type=int, default=None, help="address units (paper preset 1024; legacy 2048)")
+    ap.add_argument("--torus-N", type=int, default=None, help="torus side (paper 48; legacy 32)")
+    ap.add_argument("--k", type=int, default=None, help="active address units (paper 64; legacy N_h/16)")
+    ap.add_argument("--ring-N", type=int, default=None, help="orientation ring units in the scaffold state (paper 256; legacy 0 = position only)")
+    ap.add_argument("--scene-unit", default=None, help="metres per scene unit for the position encoding: a number, or 'auto' = median depth of the first window (paper), or 'none' (legacy)")
+    ap.add_argument("--paper", dest="paper", action="store_true", default=True,
+                    help="(default) the configuration described in the manuscript: 1024/64 address over a 7,824-D state with orientation rings, median-depth units, pairs at exactly +-3, two pairs required, agreement test 3 deg / 0.15 E, Sim(3) interpolation, IRLS alignment with the scale gate")
+    ap.add_argument("--legacy", dest="paper", action="store_false", help="the pre-v198 configuration that produced the earlier reports")
+    ap.add_argument("--paper-gates", action="store_true", help="with --paper, also keep the per-pair validity gates and drift budget of the legacy configuration")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--cache", default="",
                     help="pass cache (.npy); reruns never re-infer a pass")
@@ -245,6 +268,30 @@ def main():
     ap.add_argument("--chunk-distortion", type=float, default=0.1)
     ap.add_argument("--sim-frames", type=int, default=40, help="frames per lap")
     a = ap.parse_args()
+    # ---- v198 presets: fill every unspecified value from the chosen configuration
+    P = dict(N_h=1024, torus_N=48, k=64, ring_N=256, scene_unit="auto", correction="distribute", site_agree="3,0.15", seq_scale_gate=1.5,
+             fit_mode="irls", pair_strict=True, require_two_sites=True, reject_on_disagree=True)
+    L = dict(N_h=2048, torus_N=32, k=None, ring_N=0, scene_unit="none", correction="relax", site_agree="1e9,1e9", seq_scale_gate=None,
+             fit_mode="robust", pair_strict=False, require_two_sites=False, reject_on_disagree=False)
+    preset = P if a.paper else L
+    for key in ("N_h", "torus_N", "k", "ring_N", "scene_unit"):
+        if getattr(a, key) is None:
+            setattr(a, key, preset[key])
+    if a.paper and a.correction == "relax" and "--correction" not in sys.argv:
+        a.correction = preset["correction"]
+    if a.paper and a.site_agree == "1e9,1e9" and "--site-agree" not in sys.argv:
+        a.site_agree = preset["site_agree"]
+    if a.paper and not a.paper_gates:
+        # the manuscript's acceptance is the agreement test alone: per-pair validity gates and the drift budget are not applied
+        if "--extent-factor" not in sys.argv: a.extent_factor = 1e9
+        if "--site-rot" not in sys.argv: a.site_rot = 180.0
+        if "--site-dir" not in sys.argv: a.site_dir = 180.0
+        if "--budget-rot" not in sys.argv: a.budget_rot = "1e9,0,1e9"
+        if "--budget-pos" not in sys.argv: a.budget_pos = "1e9,0"
+        if "--tight-rot" not in sys.argv: a.tight_rot = "1e9,0,1e9"
+        if "--tight-pos" not in sys.argv: a.tight_pos = "1e9,0"
+    a._preset = preset
+    AnchoredStitcher.fit_mode = preset["fit_mode"]
     AnchoredStitcher.local_from = a.local_from
     AnchoredStitcher.distortion_gate = a.distortion_gate   # v192   # v181 (class attribute; every stitcher instance reads it)
 
@@ -380,7 +427,22 @@ def main():
                   budget_logscale=a.budget_logscale,
                   tight_rot=tuple(float(x) for x in a.tight_rot.split(",")),
                   tight_pos=tuple(float(x) for x in a.tight_pos.split(",")),
-                  smooth_junctions=not a.no_smooth_junctions, top_proposals=a.top_proposals)
+                  smooth_junctions=not a.no_smooth_junctions, top_proposals=a.top_proposals,
+                  pair_strict=a._preset["pair_strict"], require_two_sites=a._preset["require_two_sites"],
+                  reject_on_disagree=a._preset["reject_on_disagree"], seq_scale_gate=a._preset["seq_scale_gate"])
+
+    # ---- scene unit for the position encoding (paper: median depth of the first window = 1)
+    pos_scale = 1.0
+    if str(a.scene_unit) not in ("none", "None", ""):
+        if str(a.scene_unit) == "auto":
+            md = median_depth_first_window(runner, chunks[0]) if runner is not None else None
+            if md:
+                pos_scale = 1.0 / md
+                print(f"scene unit: median depth of window 0 = {md:.3f} (positions scaled by {pos_scale:.3f})")
+            else:
+                print("scene unit: median depth unavailable (synthetic or no depth); positions unscaled")
+        else:
+            pos_scale = 1.0 / float(a.scene_unit)
 
     def scaffold():
         if a.index == "flat":
@@ -393,8 +455,8 @@ def main():
             ss.calibrate()
             return ScaffoldIndex(N_h=a.N_h, torus_N=a.torus_N, seed=a.seed, desc_dim=dim,
                                  encode="dynamics", scaffold_state=ss)
-        return ScaffoldIndex(N_h=a.N_h, torus_N=a.torus_N, seed=a.seed,
-                             desc_dim=dim)
+        return ScaffoldIndex(N_h=a.N_h, torus_N=a.torus_N, k=a.k, seed=a.seed,
+                             desc_dim=dim, ring_N=a.ring_N, pos_scale=pos_scale)
 
     def loops_of(r):
         return dict(n_loops=r["n_loops"], n_rejected=r["n_rejected"],

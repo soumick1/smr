@@ -33,7 +33,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--summary", nargs="*", default=None)
     ap.add_argument("--backbone"); ap.add_argument("--ckpt"); ap.add_argument("--gso", default="~/data/nvs/gso")
-    ap.add_argument("--reads", type=int, default=1); ap.add_argument("--source", default="auto")
+    ap.add_argument("--reads", type=int, default=1, help=argparse.SUPPRESS); ap.add_argument("--source", default="auto")
     ap.add_argument("--json", default=None); ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--n-in", type=int, default=4)
     ap.add_argument("--backbone-kw", action="append", default=[])
@@ -60,7 +60,9 @@ def main():
         print(f"val-only: {len(objs)} held-out objects")
     if a.limit:
         objs = objs[: a.limit]
-    out = pathlib.Path(a.json or f"outputs/nvs/{a.backbone}/gso_reads{a.reads}.jsonl"); out.parent.mkdir(parents=True, exist_ok=True)
+    if a.reads != 1:
+        raise SystemExit("v198: repeated reads were removed; eval_gso evaluates the single-pass geometry only")
+    out = pathlib.Path(a.json or f"outputs/nvs/{a.backbone}/gso_raw.jsonl"); out.parent.mkdir(parents=True, exist_ok=True)
     done = {json.loads(l)["id"] for l in open(out) if l.strip()} if out.exists() else set()
     crashed_f = out.with_suffix(".crashed"); inflight_f = out.with_suffix(".inflight")
     crashed = set(crashed_f.read_text().split()) if crashed_f.exists() else set()

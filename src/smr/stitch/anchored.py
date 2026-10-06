@@ -82,7 +82,9 @@ class AnchoredStitcher:
                  remeasure_dir_deg=20.0, remeasure_ratio=1.5,
                  correction="relax", robust=True, pose_proposals=True,
                  smooth_junctions=True, mutual_nn=False, site_agree_rot=1e9,
-                 site_agree_pos=1e9, revoke=True, verbose=False):
+                 site_agree_pos=1e9, revoke=True, verbose=False,
+                 pair_strict=False, require_two_sites=False, reject_on_disagree=False,
+                 seq_scale_gate=None):
         self.index = index if index is not None else DescriptorIndex()
         self.n_sites = int(n_sites)
         self.recent_window = recent_window
@@ -98,6 +100,12 @@ class AnchoredStitcher:
         self.budget_logscale = budget_logscale
         self.tight_rot, self.tight_pos = tight_rot, tight_pos
         self.require_appearance = require_appearance
+        # v198 paper rules: partner exactly +-partner_gap, two verified pairs or no closure, disagreement rejects the
+        # revisit (no single-pair demotion), consecutive-window scale gate gamma_s (App. A)
+        self.pair_strict = bool(pair_strict)
+        self.require_two_sites = bool(require_two_sites)
+        self.reject_on_disagree = bool(reject_on_disagree)
+        self.seq_scale_gate = seq_scale_gate
         self.remeasure = remeasure
         self.remeasure_rot_deg, self.remeasure_dir_deg = remeasure_rot_deg, remeasure_dir_deg
         self.remeasure_ratio = remeasure_ratio
@@ -112,7 +120,11 @@ class AnchoredStitcher:
         self.verbose = verbose
 
     # ------------------------------------------------------------- helpers
+    fit_mode = "robust"      # v198 class attribute: "robust" (drop-worst, legacy) or "irls" (App. A reweighting); pilot_a sets it
+
     def _fit(self, A, B):
+        if getattr(self, "fit_mode", "robust") == "irls" and len(A) >= 2:
+            return sim3.fit_poses_irls(A, B, rounds=5, kappa=2.5, rot_thresh_deg=self.rot_thresh_deg)
         if self.robust and len(A) >= 3:
             S, keep, info = sim3.fit_poses_robust(
                 A, B, rot_thresh_deg=self.rot_thresh_deg,
@@ -185,7 +197,7 @@ class AnchoredStitcher:
         for j in sorted(cands, key=lambda g: -cands[g][0]):
             oc = owner[j]
             partner = None
-            for gap in range(self.partner_gap, 0, -1):
+            for gap in ((self.partner_gap,) if self.pair_strict else range(self.partner_gap, 0, -1)):
                 for p in (j + gap, j - gap):
                     if p in stored and owner[p] == oc and p not in exclude:
                         partner = p
@@ -363,12 +375,22 @@ class AnchoredStitcher:
                     n_app_sites += int(site[3] > 0.0)
             if self.require_appearance and n_app_sites == 0:
                 good_old = []            # pose-only sites cannot close a loop
+            if self.require_two_sites and n_ok_sites < 2:
+                good_old = []            # paper rule: fewer than two valid pairs -> no retrieval-based correction
 
             # -- chained placement from the overlap
             if not session_start:
                 A_ov = P[[pos[g] for g in overlap]]
                 B_ov = np.stack([stored[g] for g in overlap])
                 S_A, keep_ov, info_ov = self._fit(A_ov, B_ov)
+                if self.seq_scale_gate:
+                    # App. A scale check: the fitted scale must agree with the median ratio of pairwise camera-centre
+                    # distances within a factor gamma_s, otherwise the window keeps the previous window's scale
+                    s_pair = sim3.pairwise_scale(A_ov[:, :3, 3], B_ov[:, :3, 3])
+                    if s_pair > 0 and not (1.0 / self.seq_scale_gate <= S_A[0] / s_pair <= self.seq_scale_gate):
+                        S_A = sim3.fit_poses_fixed_scale(A_ov, B_ov, prev_scale)
+                        info_ov = dict(info_ov, scale_gated=True)
+                prev_scale = S_A[0]
             else:
                 # no chain: continue from the last stored pose with the
                 # previous scale (a placeholder until anchors place it)
@@ -396,7 +418,14 @@ class AnchoredStitcher:
                     pa = per_site[0][0] * (per_site[0][1] @ centroid_pass) + per_site[0][2]
                     pb = per_site[1][0] * (per_site[1][1] @ centroid_pass) + per_site[1][2]
                     pos_d = float(np.linalg.norm(pa - pb)) / spread_w
-                    if rot_d > self.site_agree_rot or pos_d > self.site_agree_pos:
+                    if (rot_d > self.site_agree_rot or pos_d > self.site_agree_pos) and self.reject_on_disagree:
+                        # paper rule (Eq. site-agreement): the two proposals disagree -> the revisit is rejected
+                        for s_ in [x for x in site_log if x["ok"]]:
+                            s_["ok"] = False
+                            s_["disagree"] = dict(rot_deg=float(rot_d), pos_rel=pos_d, rejected=True)
+                        good_old = []
+                        n_ok_sites = 0
+                    elif rot_d > self.site_agree_rot or pos_d > self.site_agree_pos:
                         # the sites disagree -- the aliasing signature.  Keep
                         # the one closer to dead reckoning (S_A) but demote
                         # the closure to single-site, i.e. the tight budget:

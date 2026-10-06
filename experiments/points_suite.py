@@ -359,6 +359,9 @@ def real(a):
     if pilot is not None:
         ctx_ids = pilot["chunks"]
     if a.reads > 1:
+        raise SystemExit("v198: repeated reads (--reads > 1) were removed from the method; dense geometry comes from the "
+                         "stored windows placed by the revised T_k (see experiments/nvs_sequence.py), not from re-reading views")
+    if False:
         # v124: K reads of the SAME view set with rotated orderings (the first
         # frame fixes the backbone's frame and reference).  Each read is one
         # context; the consensus read across them is the memory's

@@ -102,10 +102,11 @@ class ScaffoldIndex(DescriptorIndex):
 
     def __init__(self, periods=PERIODS, torus_N=32, N_h=2048, k=None,
                  seed=0, encode="template", scaffold_state=None,
-                 rls_lam=1e2, desc_dim=448):
+                 rls_lam=1e2, desc_dim=448, ring_N=0, pos_scale=1.0):
         super().__init__()
         self.block = BlockScaffold(list(periods), torus_N=torus_N, N_h=N_h,
-                                   k=(k or max(8, N_h // 16)), seed=seed)
+                                   k=(k or max(8, N_h // 16)), seed=seed, ring_N=ring_N)
+        self.pos_scale = float(pos_scale)      # v198: positions are encoded in scene units (1 / median depth of the first window)
         self.mem = RLSMemory(N_h=N_h, N_s=int(desc_dim), lam=rls_lam)
         self.encode = encode
         self.ss = scaffold_state          # only for encode="dynamics"
@@ -129,10 +130,11 @@ class ScaffoldIndex(DescriptorIndex):
             self.ss.place_pose(T)
             ph = self.ss.phases()
         else:
-            ph = self.block.phases_of_pos(T[:3, 3])
-        g = self.block.encode_phases(ph)
+            ph = self.block.phases_of_pos(T[:3, 3] * self.pos_scale)
+        euler = np.array(R_to_euler_zyx(T[:3, :3]))
+        g = self.block.encode_phases(ph, euler if self.block.ring_N else None)
         h = self.block.h_of(g)
-        xi = np.concatenate([np.array(R_to_euler_zyx(T[:3, :3])), ph.ravel()])
+        xi = np.concatenate([euler, ph.ravel()])
         return h, xi
 
     def add(self, gi, T, s):

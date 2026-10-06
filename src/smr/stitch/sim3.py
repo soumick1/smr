@@ -149,6 +149,62 @@ def fit_poses_robust(A, B, rot_thresh_deg=10.0, pos_thresh_rel=0.5,
     return S, keep, info
 
 
+def pairwise_scale(cA, cB):
+    """Median ratio of pairwise camera-centre distances B / A (the s_pair of App. A); 0 if undefined."""
+    cA, cB = np.asarray(cA, float), np.asarray(cB, float)
+    n = len(cA)
+    if n < 2:
+        return 0.0
+    iu = np.triu_indices(n, 1)
+    dA = np.linalg.norm(cA[:, None] - cA[None], axis=-1)[iu]
+    dB = np.linalg.norm(cB[:, None] - cB[None], axis=-1)[iu]
+    ok = dA > 1e-9
+    return float(np.median(dB[ok] / dA[ok])) if ok.any() else 0.0
+
+
+def fit_poses_weighted(A, B, w):
+    """fit_poses with per-frame weights w >= 0 (IRLS round): weighted centroids, weighted centre spreads for the
+    scale, weighted orthogonal Procrustes on the frame orientations for the rotation."""
+    A, B, w = np.asarray(A, float), np.asarray(B, float), np.asarray(w, float)
+    w = w / (w.sum() + 1e-12)
+    cA, cB = A[:, :3, 3], B[:, :3, 3]
+    mA, mB = (w[:, None] * cA).sum(0), (w[:, None] * cB).sum(0)
+    M = sum(wi * (B[i, :3, :3] @ A[i, :3, :3].T) for i, wi in enumerate(w))
+    U, _, Vt = np.linalg.svd(M)
+    d = np.sign(np.linalg.det(U @ Vt))
+    R = U @ np.diag([1, 1, d]) @ Vt
+    da, db = cA - mA, cB - mB
+    na = np.sqrt((w[:, None] * da ** 2).sum()); nb = np.sqrt((w[:, None] * db ** 2).sum())
+    s = float(nb / na) if na > 1e-9 else 1.0
+    t = mB - s * (R @ mA)
+    return (s, R, t)
+
+
+def fit_poses_irls(A, B, rounds=5, kappa=2.5, rot_thresh_deg=10.0):
+    """App. A procedure: similarity fit refined for `rounds` reweighting rounds with w_j = min(1, kappa * median(r) / r_j)
+    on the centre residuals (zero residual keeps unit weight), then frames whose rotated orientation disagrees with the
+    reference by more than rot_thresh_deg are removed and the fit repeated once.  Returns (S, inlier_mask, info)."""
+    A, B = np.asarray(A, float), np.asarray(B, float)
+    n = len(A); w = np.ones(n)
+    S = fit_poses_weighted(A, B, w)
+    for _ in range(rounds):
+        r = np.linalg.norm(S[0] * (S[1] @ A[:, :3, 3].T).T + S[2] - B[:, :3, 3], axis=1)
+        med = float(np.median(r))
+        w = np.where(r > 1e-12, np.minimum(1.0, kappa * med / np.maximum(r, 1e-12)), 1.0) if med > 1e-12 else np.ones(n)
+        S = fit_poses_weighted(A, B, w)
+    rot = np.array([rotation_angle_deg(S[1] @ A[i, :3, :3] @ B[i, :3, :3].T) for i in range(n)])
+    keep = rot <= rot_thresh_deg
+    if keep.sum() >= 2 and not keep.all():
+        S = fit_poses_weighted(A[keep], B[keep], w[keep])
+    if keep.sum() >= 2:
+        _, info = fit_poses(A[keep], B[keep])               # spread / scale_ok statistics of the retained frames
+    else:
+        info = dict(scale_ok=False, spread=1.0, n=int(keep.sum()))
+    pos_res = np.linalg.norm(S[0] * (S[1] @ A[:, :3, 3].T).T + S[2] - B[:, :3, 3], axis=1)
+    info = dict(info, weights=w, rot_res_deg=rot, pos_res=pos_res)
+    return S, keep, info
+
+
 def fit_poses_fixed_scale(A, B, s):
     """fit_poses with the scale pinned to `s`: rotation from the frame
     orientations, translation from the centroids.  Used when the anchors'
