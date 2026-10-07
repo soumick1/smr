@@ -397,7 +397,7 @@ def test_pilot_a_defaults_documented():
     src = (ROOT / "experiments" / "pilot_a.py").read_text()
     paper = re.search(r"P = dict\((.*?)\)\n", src, re.S).group(1)
     legacy = re.search(r"L = dict\((.*?)\)\n", src, re.S).group(1)
-    for key in ("N_h=1024", "torus_N=48", "k=64", "ring_N=256", 'scene_unit="auto"', 'correction="distribute"', 'site_agree="3,0.15"',
+    for key in ("N_h=1024", "torus_N=48", "k=64", "ring_N=256", 'scene_unit="auto"', 'correction="distribute"', 'site_agree="10,1.0"', 'local_from="gated"', "distortion_gate=5.0",
                 "seq_scale_gate=1.5", 'fit_mode="irls"', "require_two_sites=True", "reject_on_disagree=True", "pair_strict=True"):
         assert key in paper, key
     for key in ("N_h=2048", "torus_N=32", "ring_N=0", 'correction="relax"', 'site_agree="1e9,1e9"'):

@@ -13,3 +13,5 @@ videos/
 orbit_frames/
 co3d/
 outputs/
+cache/
+ckpt/

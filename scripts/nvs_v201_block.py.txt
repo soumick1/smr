@@ -1,0 +1,60 @@
+    results = {}
+    cgt = in_gt[:, :3, 3]; step = float(np.median(np.linalg.norm(np.diff(cgt, axis=0), axis=1))) + 1e-9
+    src_of = []
+    for Tg in tgt_gt:
+        dist = np.linalg.norm(cgt - Tg[:3, 3], axis=1) / step
+        ang = np.degrees(np.arccos(np.clip(in_gt[:, :3, 2] @ Tg[:3, 2], -1, 1)))
+        src_of.append([int(j) for j in np.argsort(dist + ang / 15.0)[: a.sources]])
+    revisit = [(max(owner[all_in[j]] for j in sj) - min(owner[all_in[j]] for j in sj)) >= 3 for sj in src_of]
+    print(f"targets: {len(src_of)}, {sum(revisit)} in revisited regions (sources span >= 3 windows); {a.sources} sources each", flush=True)
+    for name, (T_g, pts, est) in method_T.items():
+        cams = np.stack([est[g][:3, 3] for g in all_in]); centre = cams.mean(0); rad = np.linalg.norm(cams - centre, axis=1).max() + 1e-6
+        sl = slice(0, None, a.stride); Fr = {}
+        for g in all_in:
+            P = apply_pts(T_g[g], pts[g]).reshape(res, res, 3)[sl, sl]
+            dep = np.linalg.norm(P - est[g][:3, 3], axis=-1) / rad
+            cf = conf_of[g][sl, sl]
+            m = np.isfinite(P).all(-1) & np.isfinite(dep)
+            if a.conf_keep < 1.0 and m.any():
+                m &= cf >= np.quantile(cf[m], 1.0 - a.conf_keep)
+            if a.edge_thresh > 0:
+                dd = np.zeros_like(dep); dz = np.nan_to_num(dep, nan=0.0)
+                for ax_ in (0, 1):
+                    df = np.abs(np.diff(dz, axis=ax_))
+                    for padw in ((0, 1), (1, 0)):
+                        pad = [(0, 0), (0, 0)]; pad[ax_] = padw; dd = np.maximum(dd, np.pad(df, pad))
+                m &= dd <= a.edge_thresh * np.maximum(dz, 1e-6)
+            Fr[g] = ((P - centre) / rad, rgb_of[g][sl, sl], dep, cf, dep * a.stride / float(Kpred[g][0, 0]), m)
+        S_e2g, _ = sim3.fit_poses(np.stack([est[g_] for g_ in all_in]), in_gt); S_g2e = sim3.inverse(S_e2g)
+        Kt = torch.from_numpy(K_tgt).to(device).float()
+        recs, preds = [], []
+        for ti, Tg in enumerate(tgt_gt):
+            srcs = [all_in[j] for j in src_of[ti]]
+            xs, rg, dp, cf, ft, mk = (np.stack([Fr[g][q] for g in srcs]) for q in range(6))
+            x_in, valid = head_input(rg, xs, cf, np.ones(xs.shape[:3]), depth_from_cams=dp)
+            valid = valid & mk
+            Te = np.asarray(sim3.apply_one(S_g2e, Tg), float).copy(); Te[:3, 3] = (Te[:3, 3] - centre) / rad
+            with torch.no_grad():
+                xt = torch.from_numpy(x_in).to(device).permute(0, 3, 1, 2)
+                gs = head(xt, xt[:, 3:6], xt[:, 0:3], torch.from_numpy(valid).to(device))
+                if a.footprint == "pixel":
+                    f = torch.from_numpy(ft.reshape(-1)[valid.reshape(-1)]).to(device).float().clamp(1e-4, 0.1)
+                    gs["scales"] = f[:, None].expand(-1, 3).contiguous()
+                pr, _ = render(gs, torch.from_numpy(Te[None]).to(device).float(), Kt, res)
+            pi = pr.clamp(0, 1)[0].permute(1, 2, 0).cpu().numpy(); gi = tgt_imgs[ti]; preds.append(pi)
+            pt = torch.from_numpy(pi).permute(2, 0, 1)[None].to(device); gtt = torch.from_numpy(gi).permute(2, 0, 1)[None].to(device)
+            recs.append(dict(target_kf=int(tgt_local[ti]), window=int(owner[int(nearest_input[ti])]), revisit=bool(revisit[ti]),
+                             psnr=psnr(pi, gi), ssim=float(ssim_fn(pt, gtt).item()), lpips=float(perc(pt, gtt).item())))
+        results[name] = recs
+        with open(out / f"{name}.jsonl", "w") as f_:
+            for rec in recs:
+                f_.write(json.dumps(rec) + "\n")
+        if a.save_images:
+            (out / "images").mkdir(exist_ok=True)
+            for ti in np.linspace(0, len(recs) - 1, min(a.save_images, len(recs))).astype(int):
+                Image.fromarray((preds[ti] * 255).astype("uint8")).save(out / "images" / f"{name}_t{tgt_local[ti]:03d}.png")
+                Image.fromarray((tgt_imgs[ti] * 255).astype("uint8")).save(out / "images" / f"gt_t{tgt_local[ti]:03d}.png")
+        mA = np.array([[x["psnr"], x["ssim"], x["lpips"]] for x in recs]).mean(0)
+        rv = [x for x in recs if x["revisit"]]
+        mR = np.array([[x["psnr"], x["ssim"], x["lpips"]] for x in rv]).mean(0) if rv else np.full(3, np.nan)
+        print(f"{name:<8} all: PSNR {mA[0]:.2f} SSIM {mA[1]:.3f} LPIPS {mA[2]:.3f}   | revisited ({len(rv)}): PSNR {mR[0]:.2f} SSIM {mR[1]:.3f} LPIPS {mR[2]:.3f}", flush=True)

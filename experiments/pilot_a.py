@@ -250,7 +250,8 @@ def main():
     ap.add_argument("--ring-N", type=int, default=None, help="orientation ring units in the scaffold state (paper 256; legacy 0 = position only)")
     ap.add_argument("--scene-unit", default=None, help="metres per scene unit for the position encoding: a number, or 'auto' = median depth of the first window (paper), or 'none' (legacy)")
     ap.add_argument("--paper", dest="paper", action="store_true", default=True,
-                    help="(default) the configuration described in the manuscript: 1024/64 address over a 7,824-D state with orientation rings, median-depth units, pairs at exactly +-3, two pairs required, agreement test 3 deg / 0.15 E, Sim(3) interpolation, IRLS alignment with the scale gate")
+                    help="(default) the configuration described in the manuscript: 1024/64 address over a 7,824-D state with orientation rings, median-depth units, pairs at exactly +-3, two pairs required, agreement test 10 deg / 1.0 E, joint-pass distortion gate 2 deg, Sim(3) interpolation, IRLS alignment with the scale gate")
+    ap.add_argument("--set", action="append", default=[], help="override one preset entry, e.g. --set fit_mode=robust --set seq_scale_gate=None")
     ap.add_argument("--legacy", dest="paper", action="store_false", help="the pre-v198 configuration that produced the earlier reports")
     ap.add_argument("--paper-gates", action="store_true", help="with --paper, also keep the per-pair validity gates and drift budget of the legacy configuration")
     ap.add_argument("--device", default="cuda")
@@ -269,11 +270,20 @@ def main():
     ap.add_argument("--sim-frames", type=int, default=40, help="frames per lap")
     a = ap.parse_args()
     # ---- v198 presets: fill every unspecified value from the chosen configuration
-    P = dict(N_h=1024, torus_N=48, k=64, ring_N=256, scene_unit="auto", correction="distribute", site_agree="3,0.15", seq_scale_gate=1.5,
+    P = dict(N_h=1024, torus_N=48, k=64, ring_N=256, scene_unit="auto", correction="distribute", site_agree="10,1.0", local_from="gated", distortion_gate=5.0, seq_scale_gate=1.5,
              fit_mode="irls", pair_strict=True, require_two_sites=True, reject_on_disagree=True)
     L = dict(N_h=2048, torus_N=32, k=None, ring_N=0, scene_unit="none", correction="relax", site_agree="1e9,1e9", seq_scale_gate=None,
              fit_mode="robust", pair_strict=False, require_two_sites=False, reject_on_disagree=False)
-    preset = P if a.paper else L
+    preset = dict(P if a.paper else L)
+    for kv in a.set:
+        k_, v_ = kv.split("=", 1)
+        v_ = {"None": None, "True": True, "False": False}.get(v_, v_)
+        if isinstance(v_, str):
+            try: v_ = int(v_)
+            except ValueError:
+                try: v_ = float(v_)
+                except ValueError: pass
+        preset[k_] = v_
     for key in ("N_h", "torus_N", "k", "ring_N", "scene_unit"):
         if getattr(a, key) is None:
             setattr(a, key, preset[key])
@@ -290,6 +300,8 @@ def main():
         if "--budget-pos" not in sys.argv: a.budget_pos = "1e9,0"
         if "--tight-rot" not in sys.argv: a.tight_rot = "1e9,0,1e9"
         if "--tight-pos" not in sys.argv: a.tight_pos = "1e9,0"
+    if a.paper and "--local-from" not in sys.argv: a.local_from = preset.get("local_from", a.local_from)
+    if a.paper and "--distortion-gate" not in sys.argv: a.distortion_gate = preset.get("distortion_gate", a.distortion_gate)
     a._preset = preset
     AnchoredStitcher.fit_mode = preset["fit_mode"]
     AnchoredStitcher.local_from = a.local_from

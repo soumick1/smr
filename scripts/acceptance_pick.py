@@ -21,7 +21,9 @@ def rows(ds, arm):
     for f in sorted((root / ds / arm).glob("*.json")):
         r = json.load(open(f))
         for row in r.get("rows", []):
-            out.setdefault(row["name"], []).append(row)
+            nm = next((row[k] for k in ("name", "row", "variant", "label", "method") if isinstance(row.get(k), str)), None)
+            if nm:
+                out.setdefault(nm, []).append(row)
     return out
 
 arms = sorted({p.name for ds in ("7scenes", "co3d") for p in (root / ds).glob("*") if p.is_dir()} if (root / "7scenes").exists() or (root / "co3d").exists() else [])
@@ -34,9 +36,9 @@ for arm in arms:
             continue
         for row in ("chained", "smr", "smr_pgo"):
             if row in R:
-                rec[f"{key}_{row}"] = float(np.mean([x[metric] for x in R[row]])); rec[f"n_{ds}"] = len(R[row])
+                rec[f"{key}_{row}"] = float(np.mean([x.get(metric, x.get("auc30", np.nan)) for x in R[row]])); rec[f"n_{ds}"] = len(R[row])
         if "smr" in R:
-            rec[f"loops_{ds}"] = float(np.mean([x.get("n_loops", 0) for x in R["smr"]]))
+            rec[f"loops_{ds}"] = float(np.mean([next((x[k] for k in ("n_loops", "loops", "accepted", "closures") if isinstance(x.get(k), (int, float))), 0) for x in R["smr"]]))
     if not a.no_reliability:
         for ds, pat in (("7scenes", "7scenes=7scenes_{stem}_seq01.npz"), ("co3d", None)):
             if not (root / ds / arm).exists():

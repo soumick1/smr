@@ -35,7 +35,7 @@ from smr.stitch.passes import BackboneRunner, PassCache, dino_descriptors  # noq
 from smr.stitch import posegraph  # noqa: E402
 from smr.nvs.geometry import resize_map, unproject_grid  # noqa: E402
 
-PAPER = dict(N_h=1024, torus_N=48, k=64, ring_N=256, correction="distribute", site_agree=(3.0, 0.15), seq_scale_gate=1.5,
+PAPER = dict(N_h=1024, torus_N=48, k=64, ring_N=256, correction="distribute", site_agree=(10.0, 1.0), seq_scale_gate=1.5,
              fit_mode="irls", pair_strict=True, require_two_sites=True, reject_on_disagree=True,
              extent_factor=1e9, site_rot_deg=180.0, site_dir_deg=180.0, budget_rot=(1e9, 0, 1e9), budget_pos=(1e9, 0),
              tight_rot=(1e9, 0, 1e9), tight_pos=(1e9, 0))
@@ -58,13 +58,13 @@ def square_image(path, res):
     return np.asarray(im, np.float32) / 255.0
 
 
-def placements(est, local, frames):
-    """Per-frame Sim(3) placement T_g = est[g] local[g]^-1 as (s, R, t) with the scale from the stored pose pair."""
+def placements(est, local, frames_of_window):
+    """Per-window Sim(3) (scale included) taking the window's local poses onto its placed poses."""
     out = {}
-    for g in frames:
-        E, L = np.asarray(est[g], float), np.asarray(local[g], float)
-        R = E[:3, :3] @ L[:3, :3].T
-        out[g] = (1.0, R, E[:3, 3] - R @ L[:3, 3])
+    for k, fr in frames_of_window.items():
+        S, _ = sim3.fit_poses(np.stack([local[g] for g in fr]), np.stack([est[g] for g in fr]))
+        for g in fr:
+            out[g] = S
     return out
 
 
@@ -94,6 +94,9 @@ def main():
     ap.add_argument("--K", default=None, help="GT intrinsics fx,fy,cx,cy at the frames' native size (7-Scenes: 585,585,320,240); default: from the npz or the backbone")
     ap.add_argument("--res", type=int, default=256); ap.add_argument("--stride", type=int, default=2, help="pixel subsampling of each frame's points")
     ap.add_argument("--footprint", default="pixel", choices=["pixel", "head"], help="Gaussian scale: geometric pixel footprint (depth x pixel / f) or the decoder's")
+    ap.add_argument("--sources", type=int, default=12, help="input frames rendered per target (nearest by GT camera, same for every method)")
+    ap.add_argument("--conf-keep", type=float, default=0.7, help="fraction of each frame's points kept, by backbone confidence")
+    ap.add_argument("--edge-thresh", type=float, default=0.05, help="drop pixels whose relative depth jump to a neighbour exceeds this (flying pixels)")
     ap.add_argument("--methods", nargs="+", default=["raw", "smr", "smr_pgo", "oracle"])
     ap.add_argument("--legacy", action="store_true"); ap.add_argument("--desc-thresh", type=float, default=0.5)
     ap.add_argument("--save-images", type=int, default=0); ap.add_argument("--device", default="cuda")
@@ -141,6 +144,7 @@ def main():
             pos_scale = 1.0 / float(np.median(d0[np.isfinite(d0) & (d0 > 0)]))
     index = ScaffoldIndex(N_h=cfg["N_h"], torus_N=cfg["torus_N"], k=cfg["k"], ring_N=cfg["ring_N"], desc_dim=desc.shape[1], pos_scale=pos_scale)
     AnchoredStitcher.fit_mode = cfg["fit_mode"]
+    AnchoredStitcher.local_from = "anchored" if a.legacy else "gated"; AnchoredStitcher.distortion_gate = 5.0
     st = AnchoredStitcher(index, n_sites=a.sites, desc_thresh=a.desc_thresh, correction=cfg["correction"],
                           site_agree_rot=cfg["site_agree"][0], site_agree_pos=cfg["site_agree"][1], seq_scale_gate=cfg["seq_scale_gate"],
                           pair_strict=cfg["pair_strict"], require_two_sites=cfg["require_two_sites"], reject_on_disagree=cfg["reject_on_disagree"],
@@ -177,7 +181,10 @@ def main():
                 rgb_of[g] = resize_map(np.asarray(o.rgb[j], float), res)
                 c = np.asarray(o.conf[j], float) if getattr(o, "conf", None) is not None else np.ones_like(d[j])
                 conf_of[g] = resize_map(c, res); Kpred[g] = Kr
+    used = {int(e.get("chunk", -1)): (e.get("anchored_distortion") or {}).get("used") for e in r["events"]}
     for k, pidx in enumerate(r["passes"]):
+        if used.get(k) == "plain":
+            pidx = list(chunks[k])        # gated window reverted to its own pass: points must come from the pass its poses came from
         o = runner.bb.infer([in_paths[i] for i in pidx]); unpack(o, [int(i) for i in pidx], pts_smr)
         if list(pidx) != list(chunks[k]):
             o2 = runner.bb.infer([in_paths[i] for i in chunks[k]]); unpack(o2, [int(i) for i in chunks[k]], pts_raw)
@@ -196,11 +203,11 @@ def main():
     all_in = sorted(owner)
     method_T = {}
     if "raw" in a.methods:
-        method_T["raw"] = (placements(est_raw, local_raw, all_in), pts_raw, est_raw)
+        method_T["raw"] = (placements(est_raw, local_raw, frames_of_window), pts_raw, est_raw)
     if "smr" in a.methods:
-        method_T["smr"] = (placements(est_smr, local_smr, all_in), pts_smr, est_smr)
+        method_T["smr"] = (placements(est_smr, local_smr, frames_of_window), pts_smr, est_smr)
     if "smr_pgo" in a.methods:
-        method_T["smr_pgo"] = (placements(pg, local_smr, all_in), pts_smr, pg)
+        method_T["smr_pgo"] = (placements(pg, local_smr, frames_of_window), pts_smr, pg)
     if "oracle" in a.methods:
         T_or = {}
         for k, fr in frames_of_window.items():
@@ -218,56 +225,65 @@ def main():
     tgt_gt = kf_gt[tgt_local]
     nearest_input = [int(np.argmin([abs(i - j) for j in inp_local])) for i in tgt_local]
     results = {}
+    cgt = in_gt[:, :3, 3]; step = float(np.median(np.linalg.norm(np.diff(cgt, axis=0), axis=1))) + 1e-9
+    src_of = []
+    for Tg in tgt_gt:
+        dist = np.linalg.norm(cgt - Tg[:3, 3], axis=1) / step
+        ang = np.degrees(np.arccos(np.clip(in_gt[:, :3, 2] @ Tg[:3, 2], -1, 1)))
+        src_of.append([int(j) for j in np.argsort(dist + ang / 15.0)[: a.sources]])
+    revisit = [(max(owner[all_in[j]] for j in sj) - min(owner[all_in[j]] for j in sj)) >= 3 for sj in src_of]
+    print(f"targets: {len(src_of)}, {sum(revisit)} in revisited regions (sources span >= 3 windows); {a.sources} sources each", flush=True)
     for name, (T_g, pts, est) in method_T.items():
-        # map normalisation around the input cameras
         cams = np.stack([est[g][:3, 3] for g in all_in]); centre = cams.mean(0); rad = np.linalg.norm(cams - centre, axis=1).max() + 1e-6
-        norm = lambda X: (X - centre) / rad
-        xs, rgbs, deps, cfs, foot = [], [], [], [], []
+        sl = slice(0, None, a.stride); Fr = {}
         for g in all_in:
-            P = apply_pts(T_g[g], pts[g]).reshape(res, res, 3)
-            cam = est[g][:3, 3]
-            Xn = norm(P)
-            dep = np.linalg.norm(P - cam, axis=-1) / rad
-            xs.append(Xn); rgbs.append(rgb_of[g]); deps.append(dep); cfs.append(conf_of[g])
-            foot.append(dep * a.stride / float(Kpred[g][0, 0]))                            # pixel footprint in normalised units
-        xs, rgbs, deps, cfs, foot = (np.stack(v) for v in (xs, rgbs, deps, cfs, foot))
-        sub = (slice(None), slice(0, None, a.stride), slice(0, None, a.stride))
-        xs, rgbs, deps, cfs, foot = xs[sub], rgbs[sub], deps[sub], cfs[sub], foot[sub]
-        x_in, valid = head_input(rgbs, xs, cfs, np.ones(xs.shape[:3]), depth_from_cams=deps)
-        with torch.no_grad():
-            xt = torch.from_numpy(x_in).to(device).permute(0, 3, 1, 2)
-            g = head(xt, xt[:, 3:6], xt[:, 0:3], torch.from_numpy(valid).to(device))
-            if a.footprint == "pixel":
-                f = torch.from_numpy(foot.reshape(-1)[valid.reshape(-1)]).to(device).float().clamp(1e-4, 0.1)
-                g["scales"] = f[:, None].expand(-1, 3).contiguous()
-            # target cameras into this map: Sim(3) from estimated input cameras to GT, inverted, then normalised
-            S_e2g = sim3.fit_poses(np.stack([est[g_] for g_ in all_in]), in_gt)[0]
-            S_g2e = sim3.inverse(S_e2g)
-            c2w = []
-            for Tg in tgt_gt:
-                Te = sim3.apply_one(S_g2e, Tg) if hasattr(sim3, "apply_one") else Tg
-                Te = np.asarray(Te, float).copy(); Te[:3, 3] = (Te[:3, 3] - centre) / rad
-                c2w.append(Te)
-            c2w = torch.from_numpy(np.stack(c2w)).to(device).float()
-            Kt = torch.from_numpy(K_tgt).to(device).float()
-            pred, _ = render(g, c2w, Kt, res)
-        pred_np = pred.clamp(0, 1).permute(0, 2, 3, 1).cpu().numpy()
-        recs = []
-        for ti, (pi, gi) in enumerate(zip(pred_np, tgt_imgs)):
+            P = apply_pts(T_g[g], pts[g]).reshape(res, res, 3)[sl, sl]
+            dep = np.linalg.norm(P - est[g][:3, 3], axis=-1) / rad
+            cf = conf_of[g][sl, sl]
+            m = np.isfinite(P).all(-1) & np.isfinite(dep)
+            if a.conf_keep < 1.0 and m.any():
+                m &= cf >= np.quantile(cf[m], 1.0 - a.conf_keep)
+            if a.edge_thresh > 0:
+                dd = np.zeros_like(dep); dz = np.nan_to_num(dep, nan=0.0)
+                for ax_ in (0, 1):
+                    df = np.abs(np.diff(dz, axis=ax_))
+                    for padw in ((0, 1), (1, 0)):
+                        pad = [(0, 0), (0, 0)]; pad[ax_] = padw; dd = np.maximum(dd, np.pad(df, pad))
+                m &= dd <= a.edge_thresh * np.maximum(dz, 1e-6)
+            Fr[g] = ((P - centre) / rad, rgb_of[g][sl, sl], dep, cf, dep * a.stride / float(Kpred[g][0, 0]), m)
+        S_e2g, _ = sim3.fit_poses(np.stack([est[g_] for g_ in all_in]), in_gt); S_g2e = sim3.inverse(S_e2g)
+        Kt = torch.from_numpy(K_tgt).to(device).float()
+        recs, preds = [], []
+        for ti, Tg in enumerate(tgt_gt):
+            srcs = [all_in[j] for j in src_of[ti]]
+            xs, rg, dp, cf, ft, mk = (np.stack([Fr[g][q] for g in srcs]) for q in range(6))
+            x_in, valid = head_input(rg, xs, cf, np.ones(xs.shape[:3]), depth_from_cams=dp)
+            valid = valid & mk
+            Te = np.asarray(sim3.apply_one(S_g2e, Tg), float).copy(); Te[:3, 3] = (Te[:3, 3] - centre) / rad
+            with torch.no_grad():
+                xt = torch.from_numpy(x_in).to(device).permute(0, 3, 1, 2)
+                gs = head(xt, xt[:, 3:6], xt[:, 0:3], torch.from_numpy(valid).to(device))
+                if a.footprint == "pixel":
+                    f = torch.from_numpy(ft.reshape(-1)[valid.reshape(-1)]).to(device).float().clamp(1e-4, 0.1)
+                    gs["scales"] = f[:, None].expand(-1, 3).contiguous()
+                pr, _ = render(gs, torch.from_numpy(Te[None]).to(device).float(), Kt, res)
+            pi = pr.clamp(0, 1)[0].permute(1, 2, 0).cpu().numpy(); gi = tgt_imgs[ti]; preds.append(pi)
             pt = torch.from_numpy(pi).permute(2, 0, 1)[None].to(device); gtt = torch.from_numpy(gi).permute(2, 0, 1)[None].to(device)
-            recs.append(dict(target_kf=int(tgt_local[ti]), window=int(owner[int(nearest_input[ti])]), psnr=psnr(pi, gi),
-                             ssim=float(ssim_fn(pt, gtt).item()), lpips=float(perc(pt, gtt).item())))
+            recs.append(dict(target_kf=int(tgt_local[ti]), window=int(owner[int(nearest_input[ti])]), revisit=bool(revisit[ti]),
+                             psnr=psnr(pi, gi), ssim=float(ssim_fn(pt, gtt).item()), lpips=float(perc(pt, gtt).item())))
         results[name] = recs
-        with open(out / f"{name}.jsonl", "w") as f:
+        with open(out / f"{name}.jsonl", "w") as f_:
             for rec in recs:
-                f.write(json.dumps(rec) + "\n")
+                f_.write(json.dumps(rec) + "\n")
         if a.save_images:
             (out / "images").mkdir(exist_ok=True)
             for ti in np.linspace(0, len(recs) - 1, min(a.save_images, len(recs))).astype(int):
-                Image.fromarray((pred_np[ti] * 255).astype("uint8")).save(out / "images" / f"{name}_t{tgt_local[ti]:03d}.png")
+                Image.fromarray((preds[ti] * 255).astype("uint8")).save(out / "images" / f"{name}_t{tgt_local[ti]:03d}.png")
                 Image.fromarray((tgt_imgs[ti] * 255).astype("uint8")).save(out / "images" / f"gt_t{tgt_local[ti]:03d}.png")
-        m = np.array([[rc["psnr"], rc["ssim"], rc["lpips"]] for rc in recs]).mean(0)
-        print(f"{name:<8} PSNR {m[0]:.2f}  SSIM {m[1]:.3f}  LPIPS {m[2]:.3f}   ({g['means'].shape[0]} Gaussians)", flush=True)
+        mA = np.array([[x["psnr"], x["ssim"], x["lpips"]] for x in recs]).mean(0)
+        rv = [x for x in recs if x["revisit"]]
+        mR = np.array([[x["psnr"], x["ssim"], x["lpips"]] for x in rv]).mean(0) if rv else np.full(3, np.nan)
+        print(f"{name:<8} all: PSNR {mA[0]:.2f} SSIM {mA[1]:.3f} LPIPS {mA[2]:.3f}   | revisited ({len(rv)}): PSNR {mR[0]:.2f} SSIM {mR[1]:.3f} LPIPS {mR[2]:.3f}", flush=True)
     summary = dict(gt=a.gt, backbone=a.backbone, n_inputs=len(inp_local), n_targets=len(tgt_local), closures=int(r["n_loops"]), windows=len(chunks),
                    config="legacy" if a.legacy else "paper", pos_scale=pos_scale,
                    means={k: dict(psnr=float(np.mean([x["psnr"] for x in v])), ssim=float(np.mean([x["ssim"] for x in v])), lpips=float(np.mean([x["lpips"] for x in v]))) for k, v in results.items()},
